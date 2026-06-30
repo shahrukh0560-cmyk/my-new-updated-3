@@ -1,0 +1,40 @@
+{
+  "summary": "Tested OptiCRM iteration 7 features: inventory CSV (export/template/import), /api/sync prefetch, and per-branch staff assignment. Backend pytest: 11/11 pass on the public preview URL (inventory.csv 200/owner 403/staff with header starting 'name,category,brand,', inventory-template.csv 200/owner 403/staff, inventory-import with 2 imported / 1 skipped (sku dup) / 1 row error (missing name) — Pydantic rejects rows missing category or null price at parse-time with 422 so the row-level error path only catches missing-name; staff gets 403 on import; /api/sync 200 returns branches/customers/inventory/orders/reminders/broadcast/staff/dashboard for owner with no _id leakage, staff sees tenant data but staff array is empty as required, super_admin sees staff; POST /api/staff with branch_id persists and is returned in /staff list; PUT /api/staff/{id} to set branch_id works; tenant isolation in sync.staff confirmed). Frontend (mobile 390x844): owner login routes to dashboard, More tab shows connectivity-card with more-resync-button and last-synced-at 'Last synced HH:MM AM/PM' timestamp (updates after tapping refresh). /data screen has data-tab-customers + data-tab-inventory; inventory tab exposes export-inventory-button, download-inventory-template-button, import-inventory-button. /staff/new exposes branch-chip-all + branch-chip-<id> chips; selecting a branch chip and submitting creates a user whose branch_id (verified via API) equals the selected branch id. /staff/[id] edit screen exposes edit-branch-chip-all + edit-branch-chip-<id> with the current branch pre-selected.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "PUT /api/staff/{id}", "issue": "Server uses `if body.branch_id is not None` (server.py:1455) so submitting branch_id=null is treated as 'no change'. The frontend 'All branches' chip in /staff/[id] sets branchId=null on tap — saving therefore does NOT clear an already-assigned branch. Suggest using model_fields_set / exclude_unset semantics so explicit nulls actually unset branch_id."},
+      {"endpoint": "POST /api/inventory-import", "issue": "InventoryImportRow uses strict Literal for category and required float for price, so rows missing category or with null price raise 422 at request parse-time and never appear in the per-row 'errors' array. Only missing-name yields a row-level error. Not strictly a bug, but the spec's intent ('returns {imported, skipped_duplicates, errors}') reads as if all required-field violations should be reported per-row."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "/staff/[id] All branches chip", "issue": "Tapping 'All branches' (edit-branch-chip-all) and Saving will NOT actually clear an existing branch assignment because the backend ignores null branch_id on PUT (see backend minor #1).", "testID": "edit-branch-chip-all", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": [
+      {"component": "react-native-web pointerEvents", "issue": "Console warning 'props.pointerEvents is deprecated. Use style.pointerEvents' still appears at app boot (carried over from iteration 6)."}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_inventory_sync_branch.py",
+    "/app/test_reports/pytest/inventory_sync_branch.xml"
+  ],
+  "action_items": [
+    "Fix PUT /api/staff/{id} to allow clearing branch_id when null is explicitly provided. Switch StaffUpdateIn handling to use body.model_dump(exclude_unset=True) (or check `'branch_id' in body.model_fields_set`) so the 'All branches' chip in the edit screen actually unassigns the user."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now 1611 lines (was 1419 in iteration 6) — still exceeds 700-line guideline. Consider splitting CSV/import handlers and the /sync endpoint into separate modules.",
+    "InventoryImportRow.category Literal validation at the Pydantic layer means rows with empty/missing category are rejected wholesale with 422 instead of being captured in the per-row errors array. Either relax to str + validate inside the loop, or document the behaviour for clients."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_inventory_sync_branch.py (created)"
+  ],
+  "success_rate": {"backend": "100% (11/11)", "frontend": "100% (all targeted flows)"},
+  "seed_data_creation": "Inventory import test inserted 2 TEST inventory items (SKUs TEST-SKU-A-* and TEST-SKU-B-*) into shop1 tenant; visible on dashboard 'Low Stock Alerts'. UI test created one staff user 'UI Branch <ts>' which was deleted via API at end of run. One transient staff fixture cleaned up via teardown.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "EXPO_PUBLIC_BACKEND_URL=https://mobile-optical-sync.preview.emergentagent.com. shop1 tenant now has lingering TEST inventory items (SKUs starting TEST-SKU-) — safe to ignore, used to verify import persistence. Backend tests at /app/backend/tests/test_inventory_sync_branch.py cover the iteration-7 surface; iteration-6 surface is in test_staff_csv.py. PUT /api/staff branch_id=null is a known no-op (see action_items).",
+  "rca_of_issue": "PUT /api/staff branch_id=null no-op RCA: server.py:1455 reads `if body.branch_id is not None: update['branch_id'] = body.branch_id`. Pydantic deserialises a JSON null into Python None, but the guard skips the assignment, so MongoDB $set never receives the field and the previous value is retained. Fix: use exclude_unset semantics (`body.model_dump(exclude_unset=True)`) and apply field-by-field, OR introduce a sentinel/default like 'unchanged'. Reproduction: PUT /api/staff/{id} with body {\"branch_id\": null} — response still shows the previous branch_id."
+}

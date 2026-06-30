@@ -1,0 +1,45 @@
+{
+  "summary": "Iteration 9 backend testing complete. All 34 tests passed (100%). Covered: auth (super admin + owner register), customer birthday/anniversary persistence, /customers/celebrations/today, /customers/wishes/send + /send-bulk (mocked sent_mock), full coupons CRUD + validate (incl. duplicate 400, below-min 400, not-found 404), referrals create+convert with loyalty_points increment, repair-orders create (RPR-YYYYMM-NNNNN), status update with timeline append, filter by status, subscription /auto-renew + /expiry-reminder, AI prescription scan via Gemini (returned ok=true with od_sph/os_sph/pd/confidence keys), all 6 PDF/XLSX exports (customers/inventory/sales — magic bytes %PDF / PK verified), dashboard new fields (repair_total/open/ready, birthdays_today, anniversaries_today), 4 super-admin endpoints (/admin/coupons-all, referrals-all, repair-orders-all, wishes-all) returning arrays, owner→admin endpoints returning 403, and tenant scoping across coupons/referrals/repair-orders verified between two distinct freshly-registered owners.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration_9.py",
+    "/app/test_reports/pytest/iteration_9.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is 2416 lines — exceeds 700-line guideline. Recommend splitting into modules (auth.py, customers.py, repairs.py, coupons.py, referrals.py, exports.py, ai.py, admin.py) for maintainability.",
+    "/api/coupons/validate uses POST with query params (code, subtotal) instead of JSON body — works but unconventional; consider Pydantic body for consistency.",
+    "/api/repair-orders DELETE has no role guard (any tenant user with valid token can delete); consider require_roles('owner','admin','super_admin').",
+    "/api/referrals/{rid}/convert is idempotent-unsafe: calling twice will add loyalty_points twice. Consider guarding on existing status == 'rewarded'.",
+    "/api/subscription/expiry-reminder returns minimal payload {expiring_soon:false} when subscription has no expires_at — consumers may expect days_left/expires_at keys to always be present.",
+    "AI prescription scanner exception path returns generic 502; consider distinguishing parse failure (raw text returned but JSON invalid) from upstream API failure.",
+    "Wish/Reminder sending is MOCKED (status='sent_mock') — flagged for clarity; real SMS/WhatsApp/email integration not connected.",
+    "Razorpay subscription flow is MOCKED — flagged for clarity."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration_9.py"
+  ],
+  "success_rate": {
+    "backend": "100%",
+    "frontend": "not tested (skipped per request)"
+  },
+  "test_credentials": "Super admin: superadmin@opticrm.com / SuperAdmin@2026. Owners are dynamically self-registered per-run via /api/auth/register with unique emails (ownerA_*/ownerB_*/ownertest_* @arn.com).",
+  "seed_data_creation": "Per-test ephemeral data only: dynamically-registered owner accounts, TEST_ prefixed customers (with birthday/anniversary matching TODAY's MM-DD for celebration tests), coupons with unique time-based codes, referrals, and repair orders. No cleanup performed (acceptable as data is tenant-scoped and prefixed).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "test_iteration_9.py is fully self-contained — registers fresh owners on each run so it is hermetic and idempotent. AI scan test uses PIL.ImageDraw to render a real prescription JPEG (OD/OS/PD text + border + decorative texture) — passes Gemini content-feature check. Allow up to 90s for the AI scan test. All tenant-scoping tests rely on creating two new owners per run; if rate limits ever apply to /auth/register, add backoff. The XML report is at /app/test_reports/pytest/iteration_9.xml.",
+  "mocked_apis_confirmed": [
+    "/api/customers/wishes/send returns status='sent_mock' (no real WhatsApp/SMS/email sent)",
+    "/api/customers/wishes/send-bulk same — MOCKED",
+    "Razorpay subscription start flow MOCKED (not exercised in this iteration)"
+  ],
+  "rca of the issue": "N/A — no failures encountered. All endpoints behave per spec."
+}

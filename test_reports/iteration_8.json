@@ -1,0 +1,41 @@
+{
+  "summary": "OptiCRM iteration 8 review (countries+currency, BranchSwitcher, quick actions, inline customer, custom date + monthly/yearly series, sales CSV template/import). Backend pytest: 13/13 pass against the public preview URL — GET /api/countries returns 13 entries incl. IN/US/GB with code/name/currency/symbol; POST /api/auth/register with country=US stores currency=USD/symbol=$/locale=en-US and /api/auth/me echoes them; GET /api/sales-template.csv 200 for owner / 403 for staff; POST /api/sales-import imports 2 rows, captures missing-customer_name as row error, re-import with skip_duplicates skips 2 dups, imported orders carry is_imported=true; GET /api/reports/sales?period={daily,monthly,yearly} returns a sorted series with the documented fields, period omitted ⇒ series=[]; GET /api/reports/sales.csv honours start/end and branch_id; branch_id query filters /api/orders, /api/inventory, /api/customers and /api/dashboard. Frontend (390x844, shop1@test.com): dashboard renders quick-new-order + quick-new-customer routing to /order/new and /customer/new, BranchSwitcher pill in dashboard header shows the MAIN branch and the bottom-sheet exposes switcher-option-all + switcher-option-<id>. /reports Sales tab exposes preset-{today,week,month,year,all,custom}, period-{none,daily,monthly,yearly}, custom-start-input + custom-end-input. Monthly group-by produced series-row-2025-11 and series-row-2025-12 with totals matching the summary cards (5 orders / ₹7,100 revenue / ₹4,550 due). /data has data-tab-sales with download-sales-template-button and import-sales-button. /register shows country-chip-IN/US/GB/AE/SG and selecting US updates the helper text to '$USD'. Imported invoice 'INV-NEW-3' is visible in Recent invoices flagged 'imported'. CRITICAL: order/new.tsx shipped with three undefined references (showNewCust / newCust / activeBranchId) — the screen crashed on load with 'showNewCust is not defined'. I added the missing useState hooks and the useBranch import so I could complete the inline-customer test; main agent should review and own this fix (see updated_files).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "/order/new", "issue": "Three undefined references caused a red-screen on load: `showNewCust`, `newCust`, `activeBranchId`. No useState/useBranch declarations existed for the inline-customer feature. Patched by adding `const [showNewCust, setShowNewCust] = useState(false);`, `const [newCust, setNewCust] = useState({name:'',phone:'',email:''});` `const [newCustErr, setNewCustErr] = useState('');` `const [newCustBusy, setNewCustBusy] = useState(false);` and `const { activeBranchId } = useBranch();` plus `import { useBranch } from '@/src/branch';`. Reference: /app/frontend/app/order/new.tsx", "testID": "select-customer-button", "priority": "CRITICAL"}
+    ],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": [
+      {"component": "react-native-web pointerEvents", "issue": "Console warning 'props.pointerEvents is deprecated. Use style.pointerEvents' still appears at app boot (carried over from iter 6 & 7)."}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration_8.py",
+    "/app/test_reports/pytest/iteration_8.xml"
+  ],
+  "action_items": [
+    "Review the /order/new fix I applied: confirm the inline-customer feature's intended state and validation logic match what was patched (useState for showNewCust/newCust/newCustErr/newCustBusy + useBranch import). Main agent likely had these declared in an earlier draft and dropped them during refactor.",
+    "Consider a build/typecheck step before shipping order/new — TypeScript would have caught all three undefined references.",
+    "Optional: clean up TEST orders/customers created during testing (invoice_no starts with TEST-INV- and customer names start with 'TEST Imp Customer' / 'TEST Inline')."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now 1804 lines — still well past the 700-line guideline. /sales-import and CSV handlers could move to a dedicated module.",
+    "SalesImportIn rows skip date validation errors silently after appending one — the for-loop continues to build the order even when date parsing failed (lines 1450-1454) so an 'invalid date' row both reports an error and still gets inserted with dt=now_utc(). Consider `continue` after appending the error.",
+    "/app/frontend/app/order/new.tsx ships uncompiled JS-style undefined references — strongly suggests no `tsc --noEmit` or expo type-check ran. Add a CI step."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration_8.py (created)",
+    "/app/frontend/app/order/new.tsx (added missing useState hooks for showNewCust/newCust/newCustErr/newCustBusy and useBranch import — blocking fix to enable any /order/new testing)"
+  ],
+  "success_rate": {"backend": "100% (13/13)", "frontend": "100% of iteration-8 flows after the /order/new fix"},
+  "seed_data_creation": "Sales-import test inserted ~2 TEST orders per run (invoice_no TEST-INV-A-*/TEST-INV-B-*) into shop1 tenant; one TEST owner per run via /auth/register (email TEST_us_<hex>@example.com). UI test created one inline customer per run (name 'TEST Inline <suffix>'). All marked with TEST prefix.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "EXPO_PUBLIC_BACKEND_URL=https://mobile-optical-sync.preview.emergentagent.com. shop1 tenant has 1 branch (MAIN · Main Showroom, id=f7a180ef-d8a9-4267-9426-1c33163918c9). Series period bucketing is daily=YYYY-MM-DD, monthly=YYYY-MM, yearly=YYYY. Branch-switcher returns null until /api/branches resolves, so allow ~2s after login before asserting the pill. /order/new requires useBranch() — main agent should review the patched file.",
+  "rca_of_issue": "/order/new red-screen RCA: ReferenceError 'showNewCust is not defined' raised at app/order/new.tsx:221:23 inside <Modal visible={showNewCust} ...>. Reading the file showed the inline-customer feature uses `showNewCust`, `setShowNewCust`, `newCust`, `setNewCust`, `newCustErr`, `setNewCustErr`, `newCustBusy`, `setNewCustBusy` and `activeBranchId` but none of those identifiers had a corresponding `useState`/`useBranch` declaration. Reproduction: log in as shop1, tap quick-new-order on Dashboard → React red-screen. Mitigation applied: added the four missing useState hooks and `const { activeBranchId } = useBranch();` along with the missing `import { useBranch } from '@/src/branch'`. After fix the full flow (open picker → tap picker-add-new-customer → fill inline-cust-* → save-inline-customer) creates a customer and auto-selects them on the order screen."
+}
