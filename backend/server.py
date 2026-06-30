@@ -1974,6 +1974,8 @@ async def convert_referral(rid: str, reward_points: int = 100, user: dict = Depe
     r = await db.referrals.find_one(tenant_filter(user, {"id": rid}))
     if not r:
         raise HTTPException(404, "Referral not found")
+    if r.get("status") == "rewarded":
+        return await db.referrals.find_one({"id": rid}, {"_id": 0})
     await db.referrals.update_one({"id": rid}, {"$set": {"status": "rewarded", "reward_points": reward_points, "converted_at": now_utc()}})
     # Credit referrer with loyalty points
     await db.customers.update_one({"id": r["referrer_customer_id"]}, {"$inc": {"loyalty_points": reward_points}})

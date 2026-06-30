@@ -1,59 +1,57 @@
 # OptiCRM — Product Requirements (Mobile App)
 
 ## Overview
-Full-stack Expo (React Native) mobile app for an optical retail CRM, imported from
-`https://github.com/shahrukh671994/optical-crm` and extended with admin-grade
-customer data **import / export** and **staff login & management**.
+Full-stack Expo (React Native) mobile/web app for an optical retail CRM, imported from
+`https://github.com/Shahrukh6794/arn.git` and extended with engagement features,
+operational tooling, and AI-assisted prescription capture.
 
 ## Stack
-- **Frontend**: Expo SDK 54, expo-router, react-native-safe-area-context, expo-image, expo-document-picker, expo-file-system, expo-sharing, @expo/vector-icons.
-- **Backend**: FastAPI + Motor (async MongoDB), JWT auth (bcrypt), CSV via stdlib `csv`.
-- **Integrations**: Emergent LLM key (Gemini 3 Flash) for prescription AI summaries.
+- **Frontend**: Expo SDK 54, expo-router, expo-camera, expo-document-picker, expo-file-system, expo-sharing, @expo/vector-icons. Web served on port 3000 via `expo start --web --port 3000`.
+- **Backend**: FastAPI + Motor (async MongoDB), JWT auth (bcrypt), CSV/PDF/XLSX exports.
+- **Integrations**: Emergent LLM key (Gemini 3 Flash) for prescription AI scan + summaries.
 
 ## Roles
-- **super_admin** → platform console (`/admin`), tenants, billing, broadcasts.
+- **super_admin** → platform console (`/admin`), tenants, billing, broadcasts, oversight of coupons/referrals/repairs/wishes.
 - **owner** → top of tenant; created via `/auth/register`.
-- **admin** → tenant-level full access (manage staff, imports, branches).
-- **staff** → day-to-day operations (customers, orders, inventory). No admin pages.
+- **admin** → tenant-level full access (manage staff, imports, branches, coupons).
+- **staff** → day-to-day operations (customers, orders, inventory, repairs).
 
-## Newly-added Features (latest iteration)
-### 1. Country + Currency on Registration
-- `GET /api/countries` → 13 ISO-2 countries with currency, symbol, locale.
-- `POST /api/auth/register` accepts `country` and persists `currency`, `currency_symbol`, `locale` on the owner record. Staff inherit owner's currency.
-- `/auth/me`, `/auth/login` return these fields. Frontend `useCurrency()` formats all amounts (dashboard, reports, orders, inventory).
+## What's Been Implemented
 
-### 2. Global Branch Switcher
-- `BranchProvider` (`src/branch.tsx`) holds the active branch id, persisted per-user.
-- `BranchSwitcher` pill component appears in Dashboard, Customers, Inventory, Orders & Reports headers.
-- Every list/aggregate API call (`/customers`, `/inventory`, `/orders`, `/dashboard`, `/reports/sales(.csv)`) is automatically scoped to the active branch.
+### Iteration 9 (2026-06-30) — Feature Expansion
+1. **Customer search in New Order picker** — searchable picker modal filters by name/phone/email.
+2. **Add new inventory from New Order** — inline modal creates an inventory item and adds it to the current order in one step.
+3. **PDF + Excel exports** — `/api/customers.{pdf,xlsx}`, `/api/inventory.{pdf,xlsx}`, `/api/reports/sales.{pdf,xlsx}` alongside existing CSV. UI offers all three formats per data type.
+4. **Customer Birthday + Anniversary fields** — persisted on Customer; included in customers.{csv,xlsx,pdf}.
+5. **Birthday & Anniversary auto-wish flow** — `/api/customers/celebrations/today`, `/api/customers/wishes/send`, `/api/customers/wishes/send-bulk`. Dashboard banner + dedicated Wishes screen + sent log under reminders. MOCKED WhatsApp/SMS channel.
+6. **Repair Orders module** — new collection with auto invoice number RPR-YYYYMM-NNNNN, status pipeline (received → diagnosed → in_repair → ready → delivered → cancelled), timeline, dashboard quick action + tile.
+7. **Coupon Codes** — CRUD + `/api/coupons/validate` with min_order/expiry/usage_limit/percent-or-flat; "Apply" input on New Order computes discount.
+8. **Referral System** — link a referring customer, mark converted, auto-credit loyalty_points. Idempotent re-conversion.
+9. **Subscription Expiry Reminder + Auto-Renewal** — `/api/subscription/auto-renew` and `/api/subscription/expiry-reminder`; Settings page exposes toggle + days input + banner.
+10. **AI Prescription Scanner** — `/api/prescription/ai-scan` uses Gemini 3 Flash vision to OCR a prescription photo into structured JSON (OD/OS sph/cyl/axis/add, PD, doctor, diagnosis, confidence). Camera + library fallback in app.
+11. **Super-Admin oversight** — `/api/admin/coupons-all`, `/admin/referrals-all`, `/admin/repair-orders-all`, `/admin/wishes-all` + admin screens.
 
-### 3. Dashboard Quick Actions
-- Two prominent cards: **New Order** → `/order/new`, **New Customer** → `/customer/new`.
-
-### 4. Inline Customer Creation from New Order
-- The customer picker modal now exposes an **Add new customer** row at the top.
-- Tapping opens an inline form (name + phone + email), creates via `POST /api/customers`, auto-selects the new customer.
-
-### 5. Reports — Custom Date Range + Monthly/Yearly
-- New `period=daily|monthly|yearly` param on `GET /api/reports/sales` → returns a sorted `series` array (period, orders, revenue, due, gst, discount, total).
-- UI: preset chips (Today / 7d / This month / This year / All-time / Custom) + Group-by segment + custom Start/End inputs.
-- Monthly/yearly breakdown rendered as a horizontal bar list.
-- `GET /api/reports/sales.csv` now accepts `branch_id` + `start`/`end` and the **Export** button on Reports streams the date-filtered CSV.
-
-### 6. Historical Sales (Invoice) CSV Import
-- `GET /api/sales-template.csv` — pre-filled migration template.
-- `POST /api/sales-import` — bulk imports invoices into the `orders` collection with `is_imported=true`. Skips duplicates by `invoice_no`. Invalid dates produce per-row errors instead of silent inserts.
-- UI on `/data` has a third **Sales** tab with Download Template + Import buttons.
-
-## Existing Features (from repo)
-- Auth (register/login/me) with biometrics & offline cache.
-- Customers + multi-prescription RX (OD/OS, PD, near_pd, k_readings, AI summary).
+### Pre-existing (from imported repo)
+- Auth (register/login/me) with biometric & offline cache, country/currency on signup.
+- Customers + multi-prescription RX (OD/OS, PD, near_pd, AI summary).
 - Inventory (frame/lens/contact/accessory) with low-stock, barcode/SKU lookup.
 - Orders with line items, GST, discounts, payments, fulfillment timeline.
-- Reminders (mock SMS/WhatsApp), Reports (sales/GST/inventory), Subscription (mock Razorpay).
-- Super-Admin console: tenant CRUD, plan override, status (suspend/restore), broadcasts.
+- Reminders (MOCK SMS/WhatsApp), Reports (sales/GST/inventory), Subscription (MOCK Razorpay).
+- Branches + global Branch Switcher; staff CRUD.
+- CSV import/export (customers, inventory, sales).
+- Super-admin: tenant CRUD, plan override, status (suspend/restore), broadcasts.
+
+## Testing
+- Backend: 34/34 tests passing in `/app/backend/tests/test_iteration_9.py` (report at `/app/test_reports/iteration_9.json`).
+- Frontend: Expo web bundle serves at port 3000.
+
+## Backlog (P1/P2)
+- Real SMS/WhatsApp/Email integration (Twilio/SendGrid) — currently MOCKED.
+- Live Razorpay integration — currently MOCKED.
+- Push notifications for birthday/anniversary celebrations.
+- Coupon usage tracking on order creation (decrement uses on apply at checkout).
+- Re-stock action from Repair Order completion.
+- Refactor server.py (>2400 LoC) into modular routers.
 
 ## Smart Business Enhancement
-Admin CSV import unlocks **fast onboarding** for new shops migrating from spreadsheets or
-legacy POS — the #1 friction point for SMB CRM adoption. The export then doubles as a
-**backup channel** that builds owner trust before they commit to a paid plan.
+The new **referral + coupon + birthday wishes** trio turns OptiCRM from a transactional POS into a **loyalty engine** — every customer becomes a potential acquisition channel (referrals) and a repeat-visit driver (timely celebration wishes + first-order coupons). This is the highest-leverage growth lever for SMB optical shops.
