@@ -2348,6 +2348,306 @@ async def admin_list_all_wishes(user: dict = Depends(get_current_user)):
     return await db.reminders.find({"kind": "wish"}, {"_id": 0}).sort("sent_at", -1).to_list(500)
 
 
+# ---------- Branch Metrics (Manage All Branches) ----------
+@api.get("/branches/metrics")
+async def branch_metrics(user: dict = Depends(get_current_user)):
+    """Aggregated per-branch stats for the current tenant.
+    Returns: list of { branch_id, name, code, customers, inventory, low_stock, orders_30d, revenue_30d, revenue_lifetime, unpaid_due }
+    Plus an entry with branch_id=null for records without a branch (unassigned)."""
+    tf = tenant_filter(user)
+    branches = await db.branches.find(tf, {"_id": 0}).sort("name", 1).to_list(200)
+    branches.append({"id": None, "name": "Unassigned", "code": "N/A"})
+    since = now_utc() - timedelta(days=30)
+    out = []
+    for b in branches:
+        bid = b.get("id")
+        cust_q = dict(tf); cust_q["branch_id"] = bid
+        inv_q = dict(tf); inv_q["branch_id"] = bid
+        ord_q = dict(tf); ord_q["branch_id"] = bid
+        customers = await db.customers.count_documents(cust_q)
+        inventory_docs = await db.inventory.find(inv_q, {"_id": 0, "stock": 1, "low_stock_threshold": 1}).to_list(5000)
+        inventory = len(inventory_docs)
+        low_stock = sum(1 for i in inventory_docs if i.get("stock", 0) <= i.get("low_stock_threshold", 3))
+        orders_30d = await db.orders.count_documents({**ord_q, "created_at": {"$gte": since}})
+        orders_all = await db.orders.find(ord_q, {"_id": 0, "paid": 1, "due": 1, "created_at": 1}).to_list(20000)
+        revenue_30d = sum(o.get("paid", 0) for o in orders_all if o.get("created_at") and o["created_at"] >= since)
+        revenue_lifetime = sum(o.get("paid", 0) for o in orders_all)
+        unpaid_due = sum(o.get("due", 0) for o in orders_all)
+        if customers == 0 and inventory == 0 and not orders_all and bid is None:
+            continue  # hide the unassigned row when empty
+        out.append({
+            "branch_id": bid,
+            "name": b.get("name"),
+            "code": b.get("code"),
+            "customers": customers,
+            "inventory": inventory,
+            "low_stock": low_stock,
+            "orders_30d": orders_30d,
+            "revenue_30d": round(revenue_30d, 2),
+            "revenue_lifetime": round(revenue_lifetime, 2),
+            "unpaid_due": round(unpaid_due, 2),
+        })
+    return out
+
+
+# ---------- Barcode Label PDF ----------
+@api.get("/inventory/{iid}/barcode-label.pdf")
+async def inventory_barcode_label(iid: str, count: int = 1, size: str = "small", user: dict = Depends(get_current_user)):
+    """Generates a print-ready PDF with barcode labels (Code128) for an inventory item.
+    size = 'small' (50x25mm) | 'medium' (60x40mm) | 'large' (80x50mm)
+    count = number of labels to render (max 100)"""
+    item = await db.inventory.find_one(tenant_filter(user, {"id": iid}), {"_id": 0})
+    if not item:
+        raise HTTPException(404, "Inventory item not found")
+    code = (item.get("barcode") or item.get("sku") or item.get("id") or "")[:32]
+    if not code:
+        raise HTTPException(400, "Item has no SKU/barcode to encode")
+
+    from reportlab.lib.pagesizes import mm
+    from reportlab.pdfgen import canvas
+    from reportlab.graphics.barcode import code128
+    from reportlab.lib import colors as rl_colors
+
+    SIZES = {
+        "small": (50 * mm, 25 * mm, 0.35 * mm, 12 * mm),
+        "medium": (60 * mm, 40 * mm, 0.42 * mm, 18 * mm),
+        "large": (80 * mm, 50 * mm, 0.55 * mm, 22 * mm),
+    }
+    w, h, bar_w, bar_h = SIZES.get(size, SIZES["small"])
+    n = max(1, min(int(count or 1), 100))
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=(w, h))
+    for _ in range(n):
+        # Header: item name + price
+        c.setFont("Helvetica-Bold", 8)
+        name = (item.get("name") or "")[:30]
+        c.drawString(2 * mm, h - 4 * mm, name)
+        c.setFont("Helvetica", 7)
+        brand = (item.get("brand") or "")[:20]
+        if brand:
+            c.drawString(2 * mm, h - 7 * mm, brand)
+        price = item.get("price") or 0
+        try:
+            price_txt = f"₹{float(price):,.0f}"
+        except Exception:
+            price_txt = str(price)
+        c.setFont("Helvetica-Bold", 8)
+        c.drawRightString(w - 2 * mm, h - 4 * mm, price_txt)
+
+        # Barcode
+        try:
+            bc = code128.Code128(code, barHeight=bar_h, barWidth=bar_w, humanReadable=False)
+            bc_w = bc.width
+            x = max(2 * mm, (w - bc_w) / 2)
+            bc.drawOn(c, x, (h - bar_h) / 2 - 1 * mm)
+        except Exception as e:
+            c.setFillColor(rl_colors.red)
+            c.drawString(2 * mm, h / 2, f"Barcode error: {str(e)[:20]}")
+            c.setFillColor(rl_colors.black)
+
+        # Footer: code text
+        c.setFont("Courier-Bold", 7)
+        c.drawCentredString(w / 2, 2 * mm, code)
+        c.showPage()
+    c.save()
+    return Response(content=buf.getvalue(), media_type="application/pdf", headers={
+        "Content-Disposition": f'inline; filename="barcode-{code}.pdf"'
+    })
+
+
+# ---------- Referral Program: My referral code ----------
+@api.get("/referrals/my-code")
+async def my_referral_code(user: dict = Depends(get_current_user)):
+    """Returns (or lazily creates) a unique referral code for the current user, plus an app share URL."""
+    oid = current_owner_id(user) or user["id"]
+    profile = await db.user_referrals.find_one({"user_id": user["id"]}, {"_id": 0})
+    if not profile:
+        # Build a compact code from name/email + short uuid
+        base = "".join(ch for ch in (user.get("name") or user.get("email") or "USR").upper() if ch.isalnum())[:4] or "OPTI"
+        code = f"{base}{uuid.uuid4().hex[:5].upper()}"
+        # Ensure uniqueness
+        while await db.user_referrals.find_one({"code": code}):
+            code = f"{base}{uuid.uuid4().hex[:5].upper()}"
+        profile = {
+            "user_id": user["id"],
+            "owner_id": oid,
+            "code": code,
+            "shares": 0,
+            "signups": 0,
+            "created_at": now_utc(),
+        }
+        await db.user_referrals.insert_one(profile.copy())
+        profile.pop("_id", None)
+    app_url = os.environ.get("APP_URL", "https://opticrm.app")
+    share_url = f"{app_url}/?ref={profile['code']}"
+    share_message = (
+        f"👓 I use OptiCRM to run my optical shop — inventory, prescriptions, invoicing & more.\n"
+        f"Sign up with my code {profile['code']} and try it free: {share_url}"
+    )
+    return {
+        "code": profile["code"],
+        "share_url": share_url,
+        "share_message": share_message,
+        "whatsapp_url": f"https://wa.me/?text={_url_encode(share_message)}",
+        "shares": profile.get("shares", 0),
+        "signups": profile.get("signups", 0),
+    }
+
+
+class RecordShareIn(BaseModel):
+    channel: Literal["whatsapp", "sms", "email", "copy", "download"] = "whatsapp"
+
+
+@api.post("/referrals/record-share")
+async def record_share(body: RecordShareIn, user: dict = Depends(get_current_user)):
+    """Increments share counter for the user's referral code (analytics)."""
+    await db.user_referrals.update_one(
+        {"user_id": user["id"]},
+        {"$inc": {"shares": 1, f"share_by_channel.{body.channel}": 1}, "$set": {"last_share_at": now_utc()}},
+        upsert=False,
+    )
+    return {"ok": True}
+
+
+def _url_encode(text: str) -> str:
+    from urllib.parse import quote
+    return quote(text, safe="")
+
+
+# ---------- AI Sales Copilot ----------
+class CopilotQueryIn(BaseModel):
+    question: str
+    session_id: Optional[str] = None
+
+
+@api.post("/copilot/query")
+async def copilot_query(body: CopilotQueryIn, user: dict = Depends(get_current_user)):
+    """AI Sales Copilot — answers natural language questions about your shop's data.
+    The LLM is given a summary of the tenant's data (top sellers, non-visiting customers, revenue, low stock, etc.)
+    and asked to answer the question conversationally."""
+    if not EMERGENT_LLM_KEY:
+        raise HTTPException(503, "AI key not configured")
+    q = (body.question or "").strip()
+    if not q:
+        raise HTTPException(400, "question is empty")
+
+    # Build a data snapshot for the LLM (read-only, tenant-scoped)
+    tf = tenant_filter(user)
+    now = now_utc()
+    d30 = now - timedelta(days=30)
+    d90 = now - timedelta(days=90)
+    d180 = now - timedelta(days=180)
+
+    # Orders (last 90d) with lines
+    orders_90 = await db.orders.find(
+        {**tf, "created_at": {"$gte": d90}},
+        {"_id": 0, "id": 1, "customer_id": 1, "customer_name": 1, "lines": 1, "total": 1, "paid": 1, "due": 1, "created_at": 1, "branch_id": 1, "payment_status": 1, "invoice_no": 1},
+    ).sort("created_at", -1).to_list(2000)
+    orders_30 = [o for o in orders_90 if o.get("created_at") and o["created_at"] >= d30]
+
+    # Top selling items (last 30d) by qty
+    from collections import Counter, defaultdict
+    qty_counter: Counter = Counter()
+    revenue_by_item: Dict[str, float] = defaultdict(float)
+    item_meta: Dict[str, Dict[str, Any]] = {}
+    for o in orders_30:
+        for ln in (o.get("lines") or []):
+            iid = ln.get("item_id")
+            qty = int(ln.get("quantity", 0) or 0)
+            qty_counter[iid] += qty
+            revenue_by_item[iid] += float(ln.get("total") or 0)
+            item_meta[iid] = {"name": ln.get("name"), "category": ln.get("category")}
+
+    top_sellers = []
+    for iid, q_ in qty_counter.most_common(15):
+        meta = item_meta.get(iid, {})
+        # Try to fetch inventory attributes for filter hints (e.g., progressive)
+        inv = await db.inventory.find_one({**tf, "id": iid}, {"_id": 0, "progressive_lens": 1, "blue_cut": 1, "photochromic": 1, "brand": 1, "category": 1}) or {}
+        top_sellers.append({
+            "item_id": iid,
+            "name": meta.get("name"),
+            "category": meta.get("category") or inv.get("category"),
+            "brand": inv.get("brand"),
+            "progressive_lens": inv.get("progressive_lens", False),
+            "blue_cut": inv.get("blue_cut", False),
+            "photochromic": inv.get("photochromic", False),
+            "quantity_sold": q_,
+            "revenue": round(revenue_by_item[iid], 2),
+        })
+
+    # Customers not visited (last_visit older than 180d, or never)
+    dormant = await db.customers.find(
+        {**tf, "$or": [{"last_visit": {"$lt": d180}}, {"last_visit": {"$exists": False}}, {"last_visit": None}]},
+        {"_id": 0, "id": 1, "name": 1, "phone": 1, "email": 1, "last_visit": 1, "loyalty_points": 1, "birthday": 1, "anniversary": 1},
+    ).sort("last_visit", 1).limit(50).to_list(50)
+
+    # Revenue summary
+    rev_30d = sum(o.get("paid", 0) or 0 for o in orders_30)
+    rev_90d = sum(o.get("paid", 0) or 0 for o in orders_90)
+    unpaid_due = sum(o.get("due", 0) or 0 for o in orders_90)
+
+    # Low stock inventory
+    inv_all = await db.inventory.find(tf, {"_id": 0, "id": 1, "name": 1, "stock": 1, "low_stock_threshold": 1, "category": 1, "brand": 1, "price": 1}).to_list(3000)
+    low_stock = [i for i in inv_all if i.get("stock", 0) <= i.get("low_stock_threshold", 3)][:30]
+
+    # Total counts
+    total_customers = await db.customers.count_documents(tf)
+    total_inventory = len(inv_all)
+
+    snapshot = {
+        "now": now.isoformat(),
+        "totals": {
+            "customers": total_customers,
+            "inventory_items": total_inventory,
+            "orders_30d": len(orders_30),
+            "orders_90d": len(orders_90),
+            "revenue_30d": round(rev_30d, 2),
+            "revenue_90d": round(rev_90d, 2),
+            "unpaid_due_90d": round(unpaid_due, 2),
+        },
+        "top_selling_items_30d": top_sellers,
+        "dormant_customers_180d_plus": dormant,
+        "low_stock_items": low_stock,
+        "currency_symbol": (user.get("currency_symbol") or "₹"),
+    }
+
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+        sess = body.session_id or f"copilot-{user['id']}-{uuid.uuid4().hex[:6]}"
+        chat = LlmChat(
+            api_key=EMERGENT_LLM_KEY,
+            session_id=sess,
+            system_message=(
+                "You are OptiCRM's AI Sales Copilot for an optical retail shop owner. "
+                "You will receive a JSON SNAPSHOT of the shop's recent data (top sellers, dormant customers, revenue, low stock). "
+                "Answer the OWNER'S QUESTION using ONLY the data in the snapshot. Be concise, action-oriented, and use bullet points where useful. "
+                "If the question asks about 'progressive lenses' or 'blue-cut' etc., filter top_selling_items_30d by the matching boolean flag. "
+                "If the question is about customers who haven't visited in N months, use dormant_customers_180d_plus (already filtered to 180+ days). "
+                "If data is not sufficient, say so and suggest what to record. Never invent numbers. Format currency with the symbol from the snapshot."
+            ),
+        ).with_model("gemini", "gemini-2.5-flash")
+        import json as _json
+        prompt = (
+            f"SNAPSHOT:\n```json\n{_json.dumps(snapshot, default=str)[:12000]}\n```\n\n"
+            f"OWNER QUESTION: {q}\n\nAnswer:"
+        )
+        resp = await chat.send_message(UserMessage(text=prompt))
+        answer = str(resp).strip()
+        return {"ok": True, "answer": answer, "session_id": sess, "snapshot_summary": {
+            "orders_30d": snapshot["totals"]["orders_30d"],
+            "revenue_30d": snapshot["totals"]["revenue_30d"],
+            "top_sellers": len(top_sellers),
+            "dormant": len(dormant),
+            "low_stock": len(low_stock),
+        }}
+    except Exception as e:
+        logging.exception("Copilot failed")
+        err = str(e)
+        friendly = "AI service unavailable. Top up your Emergent LLM key balance." if "budget" in err.lower() else f"Copilot failed: {err[:160]}"
+        raise HTTPException(502, friendly)
+
+
 # ---------- Health ----------
 @api.get("/")
 async def root():

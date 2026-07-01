@@ -5,6 +5,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { api } from "@/src/api";
 import { colors, spacing, radius, sizes } from "@/src/theme";
 import ScreenHeader from "@/src/components/ScreenHeader";
+import { openWhatsApp, orderSummaryMessage } from "@/src/utils/whatsapp";
 
 const currency = (n: number) => `₹${(n || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
 
@@ -89,9 +90,18 @@ export default function OrderDetail() {
       <ScreenHeader
         title={`${o.invoice_no || "Order"}`}
         right={
-          <Pressable testID="share-invoice-button" onPress={shareInvoice} hitSlop={10}>
-            <Ionicons name="share-outline" size={20} color={colors.brand} />
-          </Pressable>
+          <View style={{ flexDirection: "row", gap: spacing.md }}>
+            <Pressable
+              testID="whatsapp-order-button"
+              onPress={() => openWhatsApp(o.customer_phone, orderSummaryMessage(o))}
+              hitSlop={10}
+            >
+              <Ionicons name="logo-whatsapp" size={22} color="#25D366" />
+            </Pressable>
+            <Pressable testID="share-invoice-button" onPress={shareInvoice} hitSlop={10}>
+              <Ionicons name="share-outline" size={20} color={colors.brand} />
+            </Pressable>
+          </View>
         }
       />
       <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing.xxxl }}>

@@ -5,6 +5,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { api } from "@/src/api";
 import { colors, spacing, radius, sizes } from "@/src/theme";
 import ScreenHeader from "@/src/components/ScreenHeader";
+import { openWhatsApp, prescriptionMessage } from "@/src/utils/whatsapp";
 
 const RX_FIELDS = ["od_sph","od_cyl","od_axis","od_add","os_sph","os_cyl","os_axis","os_add","pd"] as const;
 type RxKey = typeof RX_FIELDS[number];
@@ -89,7 +90,18 @@ export default function CustomerDetail() {
 
         {(c.prescriptions || []).map((rx: any) => (
           <View key={rx.id} style={styles.rxCard} testID={`rx-card-${rx.id}`}>
-            <Text style={styles.rxDate}>Rx · {rx.date}</Text>
+            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+              <Text style={styles.rxDate}>Rx · {rx.date}</Text>
+              <Pressable
+                testID={`whatsapp-rx-${rx.id}`}
+                onPress={() => openWhatsApp(c.phone, prescriptionMessage(c, rx))}
+                style={styles.waRxBtn}
+                hitSlop={6}
+              >
+                <Ionicons name="logo-whatsapp" size={14} color="#fff" />
+                <Text style={styles.waRxTxt}>Send on WhatsApp</Text>
+              </Pressable>
+            </View>
             <View style={styles.rxGrid}>
               <View style={styles.rxCol}>
                 <Text style={styles.rxColHeader}>Eye</Text>
@@ -314,4 +326,6 @@ const styles = StyleSheet.create({
   cta: { backgroundColor: colors.brand, padding: spacing.lg, borderRadius: radius.md, alignItems: "center" },
   ctaText: { color: "#fff", fontWeight: "700", fontSize: sizes.lg },
   chip: { paddingHorizontal: spacing.md, paddingVertical: 8, borderRadius: 18, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surfaceSecondary },
+  waRxBtn: { flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: "#25D366", paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12 },
+  waRxTxt: { color: "#fff", fontWeight: "700", fontSize: 11 },
 });

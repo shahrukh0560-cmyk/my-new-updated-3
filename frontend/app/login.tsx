@@ -11,8 +11,8 @@ import { colors, spacing, radius, sizes } from "@/src/theme";
 export default function Login() {
   const { login } = useAuth();
   const router = useRouter();
-  const [email, setEmail] = useState("superadmin@opticrm.com");
-  const [password, setPassword] = useState("SuperAdmin@2026");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [bioReady, setBioReady] = useState(false);
@@ -144,8 +144,6 @@ export default function Login() {
               <Text style={styles.signupLink}>Create an account</Text>
             </Pressable>
           </View>
-
-          <Text style={styles.hint}>Demo: superadmin@opticrm.com / SuperAdmin@2026</Text>
         </View>
       </ScrollView>
     </KeyboardAvoidingView>

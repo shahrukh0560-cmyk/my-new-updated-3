@@ -9,12 +9,15 @@ import { isOnline, getQueue } from "@/src/offline";
 import { colors, spacing, radius, sizes } from "@/src/theme";
 
 const TILES = [
+  { key: "copilot", icon: "sparkles-outline", label: "AI Sales Copilot", color: "#7C57B5", route: "/copilot" },
   { key: "repair", icon: "construct-outline", label: "Repair Orders", color: "#F59E0B", route: "/repair" },
   { key: "rxscan", icon: "scan-outline", label: "AI Rx Scanner", color: "#7C57B5", route: "/prescription-scan" },
   { key: "wishes", icon: "gift-outline", label: "B'day & Anniversary", color: "#EC4899", route: "/wishes" },
   { key: "coupons", icon: "pricetag-outline", label: "Coupon Codes", color: colors.brand, route: "/coupons", adminOnly: true },
-  { key: "referrals", icon: "people-circle-outline", label: "Referrals", color: colors.brandSecondary, route: "/referrals" },
+  { key: "referrals", icon: "people-circle-outline", label: "Customer Referrals", color: colors.brandSecondary, route: "/referrals" },
+  { key: "share-app", icon: "share-social-outline", label: "Refer OptiCRM", color: "#10B981", route: "/share-app" },
   { key: "branches", icon: "business-outline", label: "Branches", color: colors.brand, route: "/branches" },
+  { key: "branches-data", icon: "grid-outline", label: "Manage All Branches", color: colors.brand, route: "/branches-data", adminOnly: true },
   { key: "staff", icon: "people-outline", label: "Staff & Users", color: colors.brandSecondary, route: "/staff", adminOnly: true },
   { key: "data", icon: "swap-vertical-outline", label: "Import / Export", color: "#7C57B5", route: "/data", adminOnly: true },
   { key: "reports", icon: "analytics-outline", label: "Reports & GST", color: colors.success, route: "/reports" },
