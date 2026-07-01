@@ -352,10 +352,10 @@ export default function NewOrder() {
       <PickerModal
         visible={showItem}
         title="Add Item"
-        data={inventory.filter((i) => i.stock > 0)}
+        data={inventory}
         searchable
         onClose={() => setShowItem(false)}
-        renderLabel={(i: any) => `${i.name} · ${currency(i.price)} · Stk ${i.stock}`}
+        renderLabel={(i: any) => `${i.name}${i.brand ? " · " + i.brand : ""} · ${currency(i.price)} · ${i.stock > 0 ? `Stk ${i.stock}` : "Out of stock"}`}
         searchFilter={(i: any, term: string) => {
           const t = term.toLowerCase();
           return (i.name || "").toLowerCase().includes(t) || (i.brand || "").toLowerCase().includes(t) || (i.sku || "").toLowerCase().includes(t) || (i.barcode || "").toLowerCase().includes(t);

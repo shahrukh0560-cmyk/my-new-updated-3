@@ -91,12 +91,32 @@ def current_owner_id(user: dict) -> Optional[str]:
 
 
 def tenant_filter(user: dict, base: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Adds tenant scoping to a Mongo query. Super-admin sees everything."""
+    """Adds tenant scoping to a Mongo query. Super-admin sees everything.
+    Non-owner users (staff/admin) with a branch_id assigned are auto-restricted to that branch."""
     q: Dict[str, Any] = dict(base or {})
     oid = current_owner_id(user)
     if oid is not None:
         q["owner_id"] = oid
+    # Branch-scoped users (staff or branch-restricted admin) only see their branch's data.
+    role = user.get("role")
+    bid = user.get("branch_id")
+    if role in ("staff", "admin") and bid and "branch_id" not in q:
+        q["branch_id"] = bid
     return q
+
+
+def user_is_branch_scoped(user: dict) -> Optional[str]:
+    """Returns the branch_id if the user is restricted to a single branch, else None."""
+    role = user.get("role")
+    bid = user.get("branch_id")
+    if role in ("staff", "admin") and bid:
+        return bid
+    return None
+
+
+def _norm_phone(p: str) -> str:
+    """Normalize a phone number for dedupe: keep only digits (drops +, spaces, dashes)."""
+    return "".join(ch for ch in (p or "") if ch.isdigit())
 
 
 def doc(d: dict) -> dict:
@@ -466,16 +486,41 @@ async def login(body: LoginIn):
 
 @api.get("/auth/me")
 async def me(user: dict = Depends(get_current_user)):
-    # Always return tenant currency/country alongside the user record.
+    # Always return tenant currency/country + business settings alongside the user record.
     oid = user.get("owner_id") or user["id"]
-    owner = await db.users.find_one({"id": oid}, {"_id": 0, "country": 1, "currency": 1, "currency_symbol": 1, "locale": 1}) or {}
+    owner = await db.users.find_one(
+        {"id": oid},
+        {"_id": 0, "country": 1, "currency": 1, "currency_symbol": 1, "locale": 1, "google_review_url": 1, "business_name": 1, "business_logo_url": 1, "business_address": 1},
+    ) or {}
     return {
         **user,
         "country": owner.get("country") or user.get("country") or "IN",
         "currency": owner.get("currency") or user.get("currency") or "INR",
         "currency_symbol": owner.get("currency_symbol") or user.get("currency_symbol") or "₹",
         "locale": owner.get("locale") or user.get("locale") or "en-IN",
+        "google_review_url": owner.get("google_review_url") or "",
+        "business_name": owner.get("business_name") or user.get("business_name") or "",
+        "business_logo_url": owner.get("business_logo_url") or "",
+        "business_address": owner.get("business_address") or "",
     }
+
+
+class BusinessSettingsIn(BaseModel):
+    google_review_url: Optional[str] = None
+    business_name: Optional[str] = None
+    business_address: Optional[str] = None
+    business_logo_url: Optional[str] = None
+
+
+@api.put("/settings/business")
+async def update_business_settings(body: BusinessSettingsIn, user: dict = Depends(require_roles("super_admin", "owner", "admin"))):
+    """Update tenant-level business settings (used by owner). Currently: Google review URL, business name/address/logo."""
+    oid = current_owner_id(user) or user["id"]
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    if updates:
+        await db.users.update_one({"id": oid}, {"$set": updates})
+    owner = await db.users.find_one({"id": oid}, {"_id": 0, "password_hash": 0}) or {}
+    return owner
 
 
 @api.get("/countries")
@@ -528,17 +573,54 @@ async def list_customers(q: Optional[str] = None, branch_id: Optional[str] = Non
 
 @api.post("/customers")
 async def create_customer(body: CustomerIn, user: dict = Depends(get_current_user)):
+    # Dedupe by mobile: if a customer with the same normalized phone exists in this tenant,
+    # return the existing customer instead of creating a duplicate.
+    norm = _norm_phone(body.phone)
+    if norm:
+        # Match any phone string that ends with the same normalized digits (handles +country prefixes).
+        tf = tenant_filter(user)
+        existing = await db.customers.find_one(
+            {**tf, "phone_normalized": norm},
+            {"_id": 0},
+        )
+        if not existing:
+            # Backfill: scan and match on the raw phone by normalizing at read time.
+            candidates = await db.customers.find(tf, {"_id": 0}).to_list(5000)
+            existing = next((c for c in candidates if _norm_phone(c.get("phone", "")) == norm), None)
+        if existing:
+            return {**existing, "existing": True}
     c = {
         "id": str(uuid.uuid4()),
         **body.model_dump(),
+        "phone_normalized": norm,
         "owner_id": current_owner_id(user),
         "prescriptions": [],
         "loyalty_points": 0,
         "created_at": now_utc(),
         "last_visit": now_utc(),
     }
+    # Force branch_id to user's branch when branch-scoped.
+    bid = user_is_branch_scoped(user)
+    if bid:
+        c["branch_id"] = bid
     await db.customers.insert_one(c.copy())
-    return doc(c)
+    return {**doc(c), "existing": False}
+
+
+@api.get("/customers/lookup-by-phone")
+async def lookup_customer_by_phone(phone: str, user: dict = Depends(get_current_user)):
+    """Live-lookup: check if a customer with this mobile already exists in the current tenant."""
+    norm = _norm_phone(phone)
+    if not norm:
+        return {"exists": False}
+    tf = tenant_filter(user)
+    existing = await db.customers.find_one({**tf, "phone_normalized": norm}, {"_id": 0})
+    if not existing:
+        candidates = await db.customers.find(tf, {"_id": 0}).to_list(5000)
+        existing = next((c for c in candidates if _norm_phone(c.get("phone", "")) == norm), None)
+    if existing:
+        return {"exists": True, "customer": existing}
+    return {"exists": False}
 
 
 @api.get("/customers/{cid}")
@@ -551,7 +633,9 @@ async def get_customer(cid: str, user: dict = Depends(get_current_user)):
 
 @api.put("/customers/{cid}")
 async def update_customer(cid: str, body: CustomerIn, user: dict = Depends(get_current_user)):
-    res = await db.customers.update_one(tenant_filter(user, {"id": cid}), {"$set": body.model_dump()})
+    data = body.model_dump()
+    data["phone_normalized"] = _norm_phone(body.phone)
+    res = await db.customers.update_one(tenant_filter(user, {"id": cid}), {"$set": data})
     if res.matched_count == 0:
         raise HTTPException(404, "Not found")
     return await db.customers.find_one({"id": cid}, {"_id": 0})
@@ -574,6 +658,23 @@ async def add_prescription(cid: str, body: PrescriptionIn, user: dict = Depends(
         {"$push": {"prescriptions": rx}, "$set": {"last_visit": now_utc()}},
     )
     return rx
+
+
+@api.put("/customers/{cid}/prescriptions/{rx_id}")
+async def update_prescription(cid: str, rx_id: str, body: PrescriptionIn, user: dict = Depends(get_current_user)):
+    c = await db.customers.find_one(tenant_filter(user, {"id": cid}))
+    if not c:
+        raise HTTPException(404, "Customer not found")
+    updates = {f"prescriptions.$.{k}": v for k, v in body.model_dump().items()}
+    updates["prescriptions.$.updated_at"] = now_utc()
+    res = await db.customers.update_one(
+        {"id": cid, "prescriptions.id": rx_id},
+        {"$set": updates},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(404, "Prescription not found")
+    c2 = await db.customers.find_one({"id": cid}, {"_id": 0})
+    return next((r for r in (c2 or {}).get("prescriptions", []) if r["id"] == rx_id), None)
 
 
 @api.delete("/customers/{cid}/prescriptions/{rx_id}")
@@ -660,6 +761,10 @@ async def create_item(body: InventoryIn, user: dict = Depends(get_current_user))
     payload = body.model_dump()
     if payload.get("gst_rate") is None:
         payload["gst_rate"] = DEFAULT_GST_RATE
+    # Force branch_id for branch-scoped users
+    bid = user_is_branch_scoped(user)
+    if bid and not payload.get("branch_id"):
+        payload["branch_id"] = bid
     item = {"id": str(uuid.uuid4()), **payload, "owner_id": current_owner_id(user), "created_at": now_utc()}
     await db.inventory.insert_one(item.copy())
     return doc(item)
@@ -740,7 +845,7 @@ async def create_order(body: OrderIn, user: dict = Depends(get_current_user)):
         "customer_phone": customer.get("phone"),
         "customer_gstin": customer.get("gstin"),
         "customer_address": customer.get("address"),
-        "branch_id": body.branch_id or customer.get("branch_id"),
+        "branch_id": body.branch_id or customer.get("branch_id") or user_is_branch_scoped(user),
         "prescription_id": body.prescription_id,
         "lines": lines_detail,
         "subtotal": round(subtotal, 2),
@@ -786,6 +891,41 @@ async def get_order(oid: str, user: dict = Depends(get_current_user)):
     if not o:
         raise HTTPException(404, "Not found")
     return o
+
+
+class OrderEditIn(BaseModel):
+    discount: Optional[float] = None
+    notes: Optional[str] = None
+    customer_address: Optional[str] = None
+    customer_gstin: Optional[str] = None
+    expected_delivery_date: Optional[str] = None
+
+
+@api.patch("/orders/{oid}")
+async def edit_order(oid: str, body: OrderEditIn, user: dict = Depends(get_current_user)):
+    """Light edit for an order — updates only allowed fields. If discount changes, totals are re-computed."""
+    o = await db.orders.find_one(tenant_filter(user, {"id": oid}), {"_id": 0})
+    if not o:
+        raise HTTPException(404, "Order not found")
+    updates: Dict[str, Any] = {}
+    for k in ("notes", "customer_address", "customer_gstin", "expected_delivery_date"):
+        v = getattr(body, k)
+        if v is not None:
+            updates[k] = v
+    if body.discount is not None:
+        new_disc = max(0.0, float(body.discount))
+        new_total = max(0.0, float(o.get("subtotal", 0)) + float(o.get("gst_amount", 0)) - new_disc)
+        new_due = max(0.0, new_total - float(o.get("paid", 0)))
+        new_status = "paid" if new_due <= 0 and new_total > 0 else ("partial" if float(o.get("paid", 0)) > 0 else "unpaid")
+        updates["discount"] = round(new_disc, 2)
+        updates["total"] = round(new_total, 2)
+        updates["due"] = round(new_due, 2)
+        updates["payment_status"] = new_status
+    if not updates:
+        return o
+    updates["updated_at"] = now_utc()
+    await db.orders.update_one({"id": oid}, {"$set": updates})
+    return await db.orders.find_one({"id": oid}, {"_id": 0})
 
 
 @api.post("/orders/{oid}/payment")
@@ -1819,7 +1959,7 @@ async def create_repair_order(body: RepairOrderIn, user: dict = Depends(get_curr
         "final_cost": 0.0,
         "expected_date": body.expected_date or "",
         "notes": body.notes or "",
-        "branch_id": body.branch_id,
+        "branch_id": body.branch_id or user_is_branch_scoped(user),
         "status": "received",
         "timeline": [{"status": "received", "at": now_utc(), "note": "Repair received", "by": user.get("name")}],
         "created_at": now_utc(),
@@ -2646,6 +2786,419 @@ async def copilot_query(body: CopilotQueryIn, user: dict = Depends(get_current_u
         err = str(e)
         friendly = "AI service unavailable. Top up your Emergent LLM key balance." if "budget" in err.lower() else f"Copilot failed: {err[:160]}"
         raise HTTPException(502, friendly)
+
+
+# ---------- Prescription PDF ----------
+@api.post("/customers/{cid}/prescriptions/{rx_id}/share-link")
+async def rx_share_link(cid: str, rx_id: str, user: dict = Depends(get_current_user)):
+    """Creates a signed, short-lived (7-day) public URL for this Rx PDF so it can be sent via WhatsApp."""
+    c = await db.customers.find_one(tenant_filter(user, {"id": cid}), {"_id": 0})
+    if not c:
+        raise HTTPException(404, "Customer not found")
+    rx = next((r for r in c.get("prescriptions", []) if r.get("id") == rx_id), None)
+    if not rx:
+        raise HTTPException(404, "Prescription not found")
+    payload = {
+        "cid": cid,
+        "rx": rx_id,
+        "oid": current_owner_id(user) or user["id"],
+        "typ": "rx_pdf",
+        "exp": datetime.now(tz=timezone.utc) + timedelta(days=7),
+    }
+    token = jwt.encode({**payload, "exp": int(payload["exp"].timestamp())}, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    app_url = os.environ.get("APP_URL", "").rstrip("/")
+    return {"url": f"{app_url}/api/rx-shared/{token}.pdf", "expires_in_days": 7}
+
+
+@api.get("/rx-shared/{token}.pdf")
+async def rx_shared_pdf(token: str):
+    """Public endpoint — serves the Rx PDF for a valid signed token (created by /share-link)."""
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(410, "This share link has expired")
+    except Exception:
+        raise HTTPException(400, "Invalid share token")
+    if payload.get("typ") != "rx_pdf":
+        raise HTTPException(400, "Invalid token type")
+    cid, rx_id, oid = payload.get("cid"), payload.get("rx"), payload.get("oid")
+    c = await db.customers.find_one({"id": cid, "owner_id": oid}, {"_id": 0})
+    if not c:
+        raise HTTPException(404, "Customer not found")
+    rx = next((r for r in c.get("prescriptions", []) if r.get("id") == rx_id), None)
+    if not rx:
+        raise HTTPException(404, "Prescription not found")
+    # Reuse the PDF-building code by calling the auth version's builder via an internal user shim.
+    fake_user = {"id": oid, "role": "owner", "owner_id": oid}
+    return await prescription_pdf(cid, rx_id, user=fake_user)  # type: ignore
+
+
+@api.get("/customers/{cid}/prescriptions/{rx_id}/pdf")
+async def prescription_pdf(cid: str, rx_id: str, user: dict = Depends(get_current_user)):
+    """Generate a branded PDF of a customer's prescription. Auth-scoped to the tenant."""
+    c = await db.customers.find_one(tenant_filter(user, {"id": cid}), {"_id": 0})
+    if not c:
+        raise HTTPException(404, "Customer not found")
+    rx = next((r for r in c.get("prescriptions", []) if r.get("id") == rx_id), None)
+    if not rx:
+        raise HTTPException(404, "Prescription not found")
+
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.pdfgen import canvas
+    from reportlab.lib import colors as rl_colors
+
+    # Owner branding
+    oid = current_owner_id(user) or user["id"]
+    owner = await db.users.find_one({"id": oid}, {"_id": 0, "business_name": 1, "business_address": 1, "business_logo_url": 1}) or {}
+    biz_name = owner.get("business_name") or user.get("business_name") or "OptiCRM"
+    biz_addr = owner.get("business_address") or ""
+
+    buf = io.BytesIO()
+    w, h = A4
+    c_pdf = canvas.Canvas(buf, pagesize=A4)
+
+    # Header
+    c_pdf.setFillColorRGB(0.34, 0.42, 0.36)  # brand green
+    c_pdf.rect(0, h - 30 * mm, w, 30 * mm, fill=1, stroke=0)
+    c_pdf.setFillColor(rl_colors.white)
+    c_pdf.setFont("Helvetica-Bold", 20)
+    c_pdf.drawString(15 * mm, h - 15 * mm, biz_name)
+    c_pdf.setFont("Helvetica", 9)
+    if biz_addr:
+        c_pdf.drawString(15 * mm, h - 21 * mm, biz_addr[:80])
+    c_pdf.drawRightString(w - 15 * mm, h - 15 * mm, "EYEWEAR PRESCRIPTION")
+    c_pdf.setFont("Helvetica", 8)
+    c_pdf.drawRightString(w - 15 * mm, h - 21 * mm, f"Date: {rx.get('date') or now_utc().strftime('%Y-%m-%d')}")
+
+    # Patient block
+    y = h - 45 * mm
+    c_pdf.setFillColor(rl_colors.black)
+    c_pdf.setFont("Helvetica-Bold", 11)
+    c_pdf.drawString(15 * mm, y, "Patient Details")
+    c_pdf.setFont("Helvetica", 10)
+    y -= 6 * mm
+    c_pdf.drawString(15 * mm, y, f"Name: {c.get('name', '')}")
+    c_pdf.drawString(110 * mm, y, f"Phone: {c.get('phone', '')}")
+    if c.get("email"):
+        y -= 5 * mm
+        c_pdf.drawString(15 * mm, y, f"Email: {c.get('email')}")
+    if rx.get("doctor_name"):
+        y -= 5 * mm
+        c_pdf.drawString(15 * mm, y, f"Doctor: {rx['doctor_name']}")
+    if rx.get("rx_type"):
+        c_pdf.drawString(110 * mm, y, f"Type: {rx['rx_type']}")
+
+    # Rx Table
+    y -= 12 * mm
+    col_x = [15 * mm, 40 * mm, 65 * mm, 90 * mm, 115 * mm, 140 * mm, 165 * mm]
+    headers = ["Eye", "SPH", "CYL", "AXIS", "ADD", "PRISM", "V/A"]
+    c_pdf.setFillColorRGB(0.94, 0.95, 0.94)
+    c_pdf.rect(15 * mm, y - 2 * mm, w - 30 * mm, 8 * mm, fill=1, stroke=0)
+    c_pdf.setFillColor(rl_colors.black)
+    c_pdf.setFont("Helvetica-Bold", 10)
+    for i, hd in enumerate(headers):
+        c_pdf.drawString(col_x[i], y + 2 * mm, hd)
+
+    def val(v):
+        return "—" if v is None or v == "" else str(v)
+
+    c_pdf.setFont("Helvetica", 10)
+    for eye_label, keys in (
+        ("OD (Right)", ["od_sph", "od_cyl", "od_axis", "od_add", "od_prism", "od_va"]),
+        ("OS (Left)", ["os_sph", "os_cyl", "os_axis", "os_add", "os_prism", "os_va"]),
+    ):
+        y -= 8 * mm
+        c_pdf.setFont("Helvetica-Bold", 10)
+        c_pdf.drawString(col_x[0], y + 2 * mm, eye_label)
+        c_pdf.setFont("Helvetica", 10)
+        for i, key in enumerate(keys, start=1):
+            c_pdf.drawString(col_x[i], y + 2 * mm, val(rx.get(key)))
+        c_pdf.setStrokeColorRGB(0.85, 0.85, 0.85)
+        c_pdf.line(15 * mm, y, w - 15 * mm, y)
+
+    # PD and additional
+    y -= 12 * mm
+    c_pdf.setFont("Helvetica-Bold", 10)
+    c_pdf.drawString(15 * mm, y, "PD (mm):")
+    c_pdf.setFont("Helvetica", 10)
+    c_pdf.drawString(35 * mm, y, val(rx.get("pd")))
+    c_pdf.setFont("Helvetica-Bold", 10)
+    c_pdf.drawString(70 * mm, y, "Near PD:")
+    c_pdf.setFont("Helvetica", 10)
+    c_pdf.drawString(90 * mm, y, val(rx.get("near_pd")))
+
+    if rx.get("notes"):
+        y -= 10 * mm
+        c_pdf.setFont("Helvetica-Bold", 10)
+        c_pdf.drawString(15 * mm, y, "Notes:")
+        c_pdf.setFont("Helvetica", 10)
+        # simple wrap
+        text = str(rx.get("notes"))[:400]
+        text_obj = c_pdf.beginText(15 * mm, y - 5 * mm)
+        text_obj.setFont("Helvetica", 10)
+        for line in text.split("\n"):
+            text_obj.textLine(line[:100])
+        c_pdf.drawText(text_obj)
+
+    if rx.get("ai_summary"):
+        y -= 30 * mm
+        c_pdf.setFont("Helvetica-Bold", 10)
+        c_pdf.drawString(15 * mm, y, "AI Summary:")
+        c_pdf.setFont("Helvetica-Oblique", 10)
+        text_obj = c_pdf.beginText(15 * mm, y - 5 * mm)
+        for line in str(rx["ai_summary"])[:400].split("\n"):
+            text_obj.textLine(line[:100])
+        c_pdf.drawText(text_obj)
+
+    # Footer
+    c_pdf.setFillColorRGB(0.5, 0.5, 0.5)
+    c_pdf.setFont("Helvetica", 8)
+    c_pdf.drawCentredString(w / 2, 15 * mm, "This document is a snapshot of your prescription. Please retain for eyewear purchases.")
+    c_pdf.drawCentredString(w / 2, 10 * mm, f"Generated by {biz_name} · OptiCRM")
+
+    c_pdf.showPage()
+    c_pdf.save()
+
+    return Response(content=buf.getvalue(), media_type="application/pdf", headers={
+        "Content-Disposition": f'inline; filename="Rx-{c.get("name", "customer")}-{rx.get("date", "")}.pdf"'
+    })
+
+
+# ---------- Bulk Barcode Labels (multi-item, single PDF) ----------
+class BulkBarcodeIn(BaseModel):
+    items: List[Dict[str, Any]]  # each: {item_id: str, count: int}
+    size: Literal["small", "medium", "large"] = "small"
+
+
+@api.post("/inventory/barcode-labels.pdf")
+async def bulk_barcode_labels(body: BulkBarcodeIn, user: dict = Depends(get_current_user)):
+    """Bulk print barcode labels for many inventory items in a single PDF.
+    Body: { items: [{item_id, count}], size: 'small'|'medium'|'large' }."""
+    if not body.items:
+        raise HTTPException(400, "No items selected")
+    from reportlab.lib.pagesizes import mm
+    from reportlab.pdfgen import canvas
+    from reportlab.graphics.barcode import code128
+    from reportlab.lib import colors as rl_colors
+
+    SIZES = {
+        "small": (50 * mm, 25 * mm, 0.35 * mm, 12 * mm),
+        "medium": (60 * mm, 40 * mm, 0.42 * mm, 18 * mm),
+        "large": (80 * mm, 50 * mm, 0.55 * mm, 22 * mm),
+    }
+    w, h, bar_w, bar_h = SIZES.get(body.size, SIZES["small"])
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=(w, h))
+    total_pages = 0
+    for row in body.items[:500]:
+        item_id = row.get("item_id")
+        count = max(1, min(int(row.get("count", 1) or 1), 100))
+        item = await db.inventory.find_one(tenant_filter(user, {"id": item_id}), {"_id": 0})
+        if not item:
+            continue
+        code = (item.get("barcode") or item.get("sku") or item.get("id") or "")[:32]
+        if not code:
+            continue
+        for _ in range(count):
+            c.setFont("Helvetica-Bold", 8)
+            c.drawString(2 * mm, h - 4 * mm, (item.get("name") or "")[:30])
+            c.setFont("Helvetica", 7)
+            if item.get("brand"):
+                c.drawString(2 * mm, h - 7 * mm, str(item.get("brand"))[:20])
+            try:
+                price_txt = f"₹{float(item.get('price') or 0):,.0f}"
+            except Exception:
+                price_txt = str(item.get("price") or "")
+            c.setFont("Helvetica-Bold", 8)
+            c.drawRightString(w - 2 * mm, h - 4 * mm, price_txt)
+            try:
+                bc = code128.Code128(code, barHeight=bar_h, barWidth=bar_w, humanReadable=False)
+                x = max(2 * mm, (w - bc.width) / 2)
+                bc.drawOn(c, x, (h - bar_h) / 2 - 1 * mm)
+            except Exception:
+                pass
+            c.setFont("Courier-Bold", 7)
+            c.drawCentredString(w / 2, 2 * mm, code)
+            c.showPage()
+            total_pages += 1
+    if total_pages == 0:
+        raise HTTPException(400, "No printable labels — items may have no SKU/barcode.")
+    c.save()
+    return Response(content=buf.getvalue(), media_type="application/pdf", headers={
+        "Content-Disposition": f'inline; filename="barcode-labels-{total_pages}.pdf"'
+    })
+
+
+# ---------- Copilot 2.0 with Actions (semi-auto WhatsApp campaigns) ----------
+class CopilotActionIn(BaseModel):
+    prompt: str
+
+
+@api.post("/copilot/plan-action")
+async def copilot_plan_action(body: CopilotActionIn, user: dict = Depends(get_current_user)):
+    """AI Sales Copilot ACTIONS mode. The LLM classifies the owner's request and returns a structured
+    action plan: { intent, params, targets: [{id, name, phone, whatsapp_url}], message_template, summary }.
+
+    Supported intents (v1):
+      - discount_campaign_dormant: send a discount offer via WhatsApp to customers who haven't visited in N days.
+      - review_request_delivered: send a Google review request to customers whose orders were delivered in last N days.
+      - restock_alert: list low-stock items and (optionally) draft supplier messages.
+    """
+    if not EMERGENT_LLM_KEY:
+        raise HTTPException(503, "AI key not configured")
+    q = (body.prompt or "").strip()
+    if not q:
+        raise HTTPException(400, "prompt is empty")
+
+    # Ask the LLM to classify intent + extract params.
+    intents_spec = {
+        "discount_campaign_dormant": {"days_since_last_visit": "int (default 180)", "discount_pct": "int 5-50 (default 15)"},
+        "review_request_delivered": {"days": "int (default 30)"},
+        "restock_alert": {"top_n": "int (default 20)"},
+        "unknown": {},
+    }
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+        chat = LlmChat(
+            api_key=EMERGENT_LLM_KEY,
+            session_id=f"copilot-action-{user['id']}-{uuid.uuid4().hex[:6]}",
+            system_message=(
+                "You are an intent classifier for OptiCRM's AI Sales Copilot. "
+                "Given the owner's message, decide which ACTION they want and extract parameters. "
+                "Return STRICT JSON only, no markdown. Format: "
+                '{"intent": "<one of: discount_campaign_dormant | review_request_delivered | restock_alert | unknown>", '
+                '"params": { ... extracted params ... }, '
+                '"draft_message": "<a short WhatsApp message the owner would want to send, using {name} as a placeholder for the customer\'s first name>", '
+                '"summary": "<1-line owner-facing description of what will happen>"} '
+                f"Supported intents & params: {intents_spec}"
+            ),
+        ).with_model("gemini", "gemini-2.5-flash")
+        resp = await chat.send_message(UserMessage(text=q))
+        raw = str(resp).strip()
+        import re, json as _json
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        plan = _json.loads(m.group(0)) if m else {"intent": "unknown", "params": {}, "draft_message": "", "summary": raw[:200]}
+    except Exception as e:
+        logging.exception("Copilot action plan LLM failed")
+        err = str(e)
+        friendly = "AI service unavailable. Top up your Emergent LLM key balance." if "budget" in err.lower() else f"Copilot planner failed: {err[:160]}"
+        raise HTTPException(502, friendly)
+
+    intent = plan.get("intent") or "unknown"
+    params = plan.get("params") or {}
+    draft = (plan.get("draft_message") or "").strip()
+    summary = (plan.get("summary") or "").strip()
+
+    tf = tenant_filter(user)
+    now = now_utc()
+    targets: List[Dict[str, Any]] = []
+
+    if intent == "discount_campaign_dormant":
+        days = int(params.get("days_since_last_visit") or 180)
+        pct = int(params.get("discount_pct") or 15)
+        cutoff = now - timedelta(days=days)
+        rows = await db.customers.find(
+            {**tf, "$or": [{"last_visit": {"$lt": cutoff}}, {"last_visit": None}, {"last_visit": {"$exists": False}}]},
+            {"_id": 0, "id": 1, "name": 1, "phone": 1},
+        ).sort("last_visit", 1).limit(100).to_list(100)
+        if not draft:
+            draft = f"Hi {{name}}! It's been a while — as a thank-you for being our customer, enjoy {pct}% off your next eyewear purchase this month. Show this message at the store. \ud83d\udc53"
+        for r in rows:
+            phone_norm = _norm_phone(r.get("phone", ""))
+            first = (r.get("name") or "").split(" ")[0] or "there"
+            msg = draft.replace("{name}", first).replace("{discount}", str(pct))
+            targets.append({
+                "id": r["id"],
+                "name": r.get("name"),
+                "phone": r.get("phone"),
+                "message": msg,
+                "whatsapp_url": (f"https://wa.me/{phone_norm}?text={_url_encode(msg)}" if phone_norm else f"https://wa.me/?text={_url_encode(msg)}"),
+            })
+        summary = summary or f"{len(targets)} dormant customers (no visit in {days}+ days) will receive {pct}% off via WhatsApp."
+
+    elif intent == "review_request_delivered":
+        days = int(params.get("days") or 30)
+        cutoff = now - timedelta(days=days)
+        oid = current_owner_id(user) or user["id"]
+        owner = await db.users.find_one({"id": oid}, {"_id": 0, "google_review_url": 1, "business_name": 1}) or {}
+        review_url = owner.get("google_review_url") or ""
+        biz = owner.get("business_name") or user.get("business_name") or "our store"
+        orders = await db.orders.find(
+            {**tf, "fulfillment_status": "delivered", "created_at": {"$gte": cutoff}},
+            {"_id": 0, "customer_id": 1, "customer_name": 1, "customer_phone": 1, "invoice_no": 1},
+        ).sort("created_at", -1).limit(100).to_list(100)
+        seen: set = set()
+        if not draft:
+            draft = f"Hi {{name}}! Thank you for choosing {biz}. If you loved our service, could you spare 30s to leave us a Google review? \u2b50\ufe0f\n{review_url or '(add your Google review link in Settings)'}"
+        for o in orders:
+            cid = o.get("customer_id")
+            if cid in seen:
+                continue
+            seen.add(cid)
+            phone_norm = _norm_phone(o.get("customer_phone", ""))
+            first = (o.get("customer_name") or "").split(" ")[0] or "there"
+            msg = draft.replace("{name}", first).replace("{business}", biz).replace("{review_url}", review_url)
+            if review_url and review_url not in msg:
+                msg = f"{msg}\n{review_url}"
+            targets.append({
+                "id": cid,
+                "name": o.get("customer_name"),
+                "phone": o.get("customer_phone"),
+                "invoice_no": o.get("invoice_no"),
+                "message": msg,
+                "whatsapp_url": (f"https://wa.me/{phone_norm}?text={_url_encode(msg)}" if phone_norm else f"https://wa.me/?text={_url_encode(msg)}"),
+            })
+        summary = summary or f"{len(targets)} customers with orders delivered in last {days} days will receive a Google review request."
+
+    elif intent == "restock_alert":
+        top_n = int(params.get("top_n") or 20)
+        items = await db.inventory.find(tf, {"_id": 0, "id": 1, "name": 1, "stock": 1, "low_stock_threshold": 1, "brand": 1, "supplier": 1}).to_list(3000)
+        low = [i for i in items if i.get("stock", 0) <= i.get("low_stock_threshold", 3)][:top_n]
+        for i in low:
+            targets.append({
+                "id": i["id"],
+                "name": i.get("name"),
+                "brand": i.get("brand"),
+                "supplier": i.get("supplier"),
+                "stock": i.get("stock"),
+                "threshold": i.get("low_stock_threshold"),
+            })
+        summary = summary or f"{len(targets)} low-stock items to reorder."
+
+    return {
+        "ok": True,
+        "intent": intent,
+        "params": params,
+        "summary": summary,
+        "draft_message": draft,
+        "targets": targets,
+        "count": len(targets),
+    }
+
+
+# ---------- Copilot 2.0 : execute recorded campaign (analytics) ----------
+class CopilotExecuteIn(BaseModel):
+    intent: str
+    sent_customer_ids: List[str] = []
+
+
+@api.post("/copilot/record-campaign")
+async def copilot_record_campaign(body: CopilotExecuteIn, user: dict = Depends(get_current_user)):
+    """After the owner clicks send on individual WhatsApp targets from the plan,
+    record what was sent for analytics/audit. Fire-and-forget."""
+    rec = {
+        "id": str(uuid.uuid4()),
+        "owner_id": current_owner_id(user) or user["id"],
+        "by": user.get("email"),
+        "intent": body.intent,
+        "sent_customer_ids": body.sent_customer_ids[:500],
+        "count": len(body.sent_customer_ids),
+        "at": now_utc(),
+    }
+    await db.copilot_campaigns.insert_one(rec.copy())
+    return {"ok": True, "recorded": rec["count"]}
 
 
 # ---------- Health ----------

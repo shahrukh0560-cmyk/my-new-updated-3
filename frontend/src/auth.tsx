@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
 import { api, tokenStore, syncAll } from "./api";
 
-type User = { id: string; email: string; name: string; role: string; owner_id?: string; branch_id?: string | null };
+type User = { id: string; email: string; name: string; role: string; owner_id?: string; branch_id?: string | null; google_review_url?: string; business_name?: string; business_address?: string; business_logo_url?: string; currency_symbol?: string };
 type AuthCtx = {
   user: User | null;
   loading: boolean;
@@ -11,6 +11,7 @@ type AuthCtx = {
   register: (name: string, email: string, password: string, country?: string) => Promise<void>;
   logout: () => Promise<void>;
   resync: () => Promise<void>;
+  refreshUser: () => Promise<void>;
 };
 
 const Ctx = createContext<AuthCtx | undefined>(undefined);
@@ -67,7 +68,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setLastSyncedAt(null);
   };
 
-  return <Ctx.Provider value={{ user, loading, syncing, lastSyncedAt, login, register, logout, resync: runSync }}>{children}</Ctx.Provider>;
+  const refreshUser = useCallback(async () => {
+    try {
+      const me = await api("/auth/me");
+      setUser(me);
+    } catch {}
+  }, []);
+
+  return <Ctx.Provider value={{ user, loading, syncing, lastSyncedAt, login, register, logout, resync: runSync, refreshUser }}>{children}</Ctx.Provider>;
 }
 
 export function useAuth() {

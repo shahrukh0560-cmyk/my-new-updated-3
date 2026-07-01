@@ -91,7 +91,8 @@ export default function NewStaff() {
 
         {branches.length > 0 && (
           <>
-            <Text style={styles.label}>Assign to branch (optional)</Text>
+            <Text style={styles.label}>Branch access</Text>
+            <Text style={styles.hint}>Pick a single branch to restrict this user's data view (they will only see and manage that branch). Choose "All branches" for full access.</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipsRow}>
               <Pressable
                 testID="branch-chip-all"

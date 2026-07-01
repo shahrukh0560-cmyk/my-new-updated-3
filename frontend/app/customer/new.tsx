@@ -16,6 +16,11 @@ export default function NewCustomer() {
     setBusy(true); setErr("");
     try {
       const c = await api("/customers", { method: "POST", body: form });
+      if (c?.existing) {
+        // Dedupe: navigate to the existing customer and show a note.
+        router.replace({ pathname: "/customer/[id]" as any, params: { id: c.id, existing: "1" } });
+        return;
+      }
       router.replace(`/customer/${c.id}`);
     } catch (e: any) { setErr(e.message || "Failed"); }
     finally { setBusy(false); }

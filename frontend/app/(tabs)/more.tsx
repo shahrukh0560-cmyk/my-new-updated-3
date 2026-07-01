@@ -10,6 +10,8 @@ import { colors, spacing, radius, sizes } from "@/src/theme";
 
 const TILES = [
   { key: "copilot", icon: "sparkles-outline", label: "AI Sales Copilot", color: "#7C57B5", route: "/copilot" },
+  { key: "copilot-actions", icon: "flash-outline", label: "Copilot Actions", color: "#F59E0B", route: "/copilot-actions" },
+  { key: "bulk-barcode", icon: "barcode-outline", label: "Bulk Barcode Print", color: colors.brand, route: "/bulk-barcode" },
   { key: "repair", icon: "construct-outline", label: "Repair Orders", color: "#F59E0B", route: "/repair" },
   { key: "rxscan", icon: "scan-outline", label: "AI Rx Scanner", color: "#7C57B5", route: "/prescription-scan" },
   { key: "wishes", icon: "gift-outline", label: "B'day & Anniversary", color: "#EC4899", route: "/wishes" },

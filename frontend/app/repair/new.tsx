@@ -13,14 +13,43 @@ export default function NewRepair() {
   const [customers, setCustomers] = useState<any[]>([]);
   const [customer, setCustomer] = useState<any | null>(null);
   const [showCust, setShowCust] = useState(false);
+  const [showNewCust, setShowNewCust] = useState(false);
   const [term, setTerm] = useState("");
   const [form, setForm] = useState({ item_description: "", issue: "", estimated_cost: "", advance_paid: "", expected_date: "", notes: "" });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [newCust, setNewCust] = useState({ name: "", phone: "", email: "" });
+  const [newCustBusy, setNewCustBusy] = useState(false);
+  const [newCustErr, setNewCustErr] = useState("");
 
-  useEffect(() => { (async () => { try { setCustomers(await api("/customers")); } catch (e) { console.warn(e); } })(); }, []);
+  const reloadCustomers = useCallback(async () => {
+    try { setCustomers(await api("/customers")); } catch (e) { console.warn(e); }
+  }, []);
+
+  useEffect(() => { reloadCustomers(); }, [reloadCustomers]);
 
   const filtered = term ? customers.filter((c) => (c.name || "").toLowerCase().includes(term.toLowerCase()) || (c.phone || "").includes(term)) : customers;
+
+  const createInlineCustomer = async () => {
+    if (!newCust.name.trim() || !newCust.phone.trim()) { setNewCustErr("Name and phone are required"); return; }
+    setNewCustBusy(true); setNewCustErr("");
+    try {
+      const c = await api("/customers", { method: "POST", body: newCust });
+      // handle dedupe
+      const pickedCustomer = c;
+      setCustomer(pickedCustomer);
+      setShowNewCust(false); setShowCust(false);
+      setNewCust({ name: "", phone: "", email: "" });
+      // Refresh so it appears in the searchable list too
+      reloadCustomers();
+      if (c?.existing) {
+        // reuse existing customer silently — flash a subtle hint via err text
+        setErr("Existing customer with this mobile — selected automatically.");
+        setTimeout(() => setErr(""), 4000);
+      }
+    } catch (e: any) { setNewCustErr(e?.message || "Failed to create customer"); }
+    finally { setNewCustBusy(false); }
+  };
 
   const onSave = async () => {
     if (!customer) { setErr("Select a customer"); return; }
@@ -116,7 +145,23 @@ export default function NewRepair() {
             <FlatList
               data={filtered}
               keyExtractor={(it) => it.id}
-              ListEmptyComponent={<Text style={{ padding: spacing.lg, color: colors.muted, textAlign: "center" }}>No matches</Text>}
+              ListHeaderComponent={
+                <Pressable
+                  testID="repair-add-new-customer"
+                  onPress={() => setShowNewCust(true)}
+                  style={styles.addNewRow}
+                >
+                  <View style={styles.addNewIcon}>
+                    <Ionicons name="person-add" size={16} color="#fff" />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.addNewTitle}>Add new customer</Text>
+                    <Text style={styles.addNewSub}>Create & select for this repair order</Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={16} color={colors.brand} />
+                </Pressable>
+              }
+              ListEmptyComponent={<Text style={{ padding: spacing.lg, color: colors.muted, textAlign: "center" }}>No matches — tap “Add new customer” above.</Text>}
               renderItem={({ item }) => (
                 <Pressable
                   testID={`repair-cust-pick-${item.id}`}
@@ -130,6 +175,34 @@ export default function NewRepair() {
             />
           </View>
         </View>
+      </Modal>
+
+      <Modal visible={showNewCust} transparent animationType="slide" onRequestClose={() => setShowNewCust(false)}>
+        <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={styles.modalWrap}>
+          <View style={[styles.modalCard, { maxHeight: "70%" }]}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>New Customer</Text>
+              <Pressable onPress={() => setShowNewCust(false)}><Ionicons name="close" size={22} color={colors.onSurface} /></Pressable>
+            </View>
+            <ScrollView contentContainerStyle={{ padding: spacing.lg }}>
+              <Text style={styles.label}>Name *</Text>
+              <TextInput testID="repair-newcust-name" value={newCust.name} onChangeText={(v) => setNewCust({ ...newCust, name: v })} style={styles.input} placeholderTextColor={colors.muted} />
+              <Text style={styles.label}>Phone *</Text>
+              <TextInput testID="repair-newcust-phone" value={newCust.phone} onChangeText={(v) => setNewCust({ ...newCust, phone: v })} keyboardType="phone-pad" style={styles.input} placeholderTextColor={colors.muted} />
+              <Text style={styles.label}>Email</Text>
+              <TextInput testID="repair-newcust-email" value={newCust.email} onChangeText={(v) => setNewCust({ ...newCust, email: v })} keyboardType="email-address" autoCapitalize="none" style={styles.input} placeholderTextColor={colors.muted} />
+              {newCustErr ? <Text style={{ color: colors.error, marginTop: spacing.sm }} testID="repair-newcust-error">{newCustErr}</Text> : null}
+              <Pressable
+                testID="repair-newcust-save"
+                onPress={createInlineCustomer}
+                disabled={newCustBusy}
+                style={[styles.cta, { marginTop: spacing.lg }, newCustBusy && { opacity: 0.7 }]}
+              >
+                <Text style={styles.ctaText}>{newCustBusy ? "Saving…" : "Add Customer"}</Text>
+              </Pressable>
+            </ScrollView>
+          </View>
+        </KeyboardAvoidingView>
       </Modal>
     </KeyboardAvoidingView>
   );
@@ -148,4 +221,8 @@ const styles = StyleSheet.create({
   modalTitle: { fontSize: sizes.xl, fontWeight: "700", color: colors.onSurface },
   searchWrap: { flexDirection: "row", alignItems: "center", gap: spacing.sm, paddingHorizontal: spacing.lg, paddingVertical: spacing.sm, borderBottomWidth: 1, borderBottomColor: colors.border, backgroundColor: colors.surfaceSecondary },
   searchInput: { flex: 1, fontSize: sizes.base, color: colors.onSurface, paddingVertical: 4 },
+  addNewRow: { flexDirection: "row", alignItems: "center", gap: spacing.md, padding: spacing.lg, backgroundColor: colors.brandTertiary, borderBottomWidth: 1, borderBottomColor: colors.border },
+  addNewIcon: { width: 32, height: 32, borderRadius: 16, backgroundColor: colors.brand, alignItems: "center", justifyContent: "center" },
+  addNewTitle: { fontWeight: "700", color: colors.brand, fontSize: sizes.base },
+  addNewSub: { color: colors.muted, fontSize: sizes.sm, marginTop: 2 },
 });

@@ -11,13 +11,33 @@ import ScreenHeader from "@/src/components/ScreenHeader";
 
 export default function Settings() {
   const router = useRouter();
-  const { user } = useAuth();
+  const { user, refreshUser } = useAuth();
   const [bioAvail, setBioAvail] = useState(false);
   const [bioOn, setBioOn] = useState(false);
   const [msg, setMsg] = useState("");
   const [sub, setSub] = useState<any>(null);
   const [reminderDays, setReminderDays] = useState("7");
   const [expiryInfo, setExpiryInfo] = useState<any>(null);
+  const [biz, setBiz] = useState({ business_name: "", business_address: "", google_review_url: "" });
+  const [bizBusy, setBizBusy] = useState(false);
+
+  useEffect(() => {
+    setBiz({
+      business_name: user?.business_name || "",
+      business_address: user?.business_address || "",
+      google_review_url: user?.google_review_url || "",
+    });
+  }, [user]);
+
+  const saveBiz = async () => {
+    setBizBusy(true);
+    try {
+      await api("/settings/business", { method: "PUT", body: biz });
+      await refreshUser();
+      setMsg("Business profile updated.");
+    } catch (e: any) { setMsg(e?.message || "Failed to save"); }
+    finally { setBizBusy(false); }
+  };
 
   useFocusEffect(useCallback(() => {
     (async () => {
@@ -106,6 +126,53 @@ export default function Settings() {
             <Text style={styles.linkTxt}>Manage Plan</Text>
           </Pressable>
         </Card>
+
+        {/* Business Profile */}
+        {isAdmin ? (
+          <Card title="Business Profile">
+            <Text style={styles.rowSub}>These details appear on invoices, prescriptions & referral messages.</Text>
+            <View style={{ marginTop: spacing.md }}>
+              <Text style={styles.rowTitle}>Business name</Text>
+              <TextInput
+                testID="biz-name-input"
+                value={biz.business_name}
+                onChangeText={(v) => setBiz({ ...biz, business_name: v })}
+                placeholder="e.g. Shahrukh Opticals"
+                placeholderTextColor={colors.muted}
+                style={[styles.input, { marginTop: 6 }]}
+              />
+              <Text style={[styles.rowTitle, { marginTop: spacing.md }]}>Business address</Text>
+              <TextInput
+                testID="biz-address-input"
+                value={biz.business_address}
+                onChangeText={(v) => setBiz({ ...biz, business_address: v })}
+                placeholder="e.g. Shop 42, MG Road, Bengaluru"
+                placeholderTextColor={colors.muted}
+                style={[styles.input, { marginTop: 6 }]}
+              />
+              <Text style={[styles.rowTitle, { marginTop: spacing.md }]}>Google Review URL</Text>
+              <Text style={styles.rowSub}>Used by "Ask for Review" on delivered orders & Copilot review campaigns.</Text>
+              <TextInput
+                testID="google-review-url-input"
+                value={biz.google_review_url}
+                onChangeText={(v) => setBiz({ ...biz, google_review_url: v })}
+                autoCapitalize="none"
+                keyboardType="url"
+                placeholder="https://g.page/r/xxxxxxxx/review"
+                placeholderTextColor={colors.muted}
+                style={[styles.input, { marginTop: 6 }]}
+              />
+              <Pressable
+                testID="save-business-profile"
+                onPress={saveBiz}
+                disabled={bizBusy}
+                style={[styles.smallBtn, { alignSelf: "flex-start", marginTop: spacing.md }, bizBusy && { opacity: 0.6 }]}
+              >
+                <Text style={styles.smallBtnTxt}>{bizBusy ? "Saving…" : "Save Business Profile"}</Text>
+              </Pressable>
+            </View>
+          </Card>
+        ) : null}
 
         {/* Engagement */}
         {isAdmin ? (

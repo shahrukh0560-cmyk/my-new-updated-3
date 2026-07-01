@@ -1,22 +1,39 @@
-import { useCallback, useState } from "react";
+import { useCallback, useState, useEffect } from "react";
 import { View, Text, StyleSheet, ScrollView, Pressable, TextInput, Modal, KeyboardAvoidingView, Platform } from "react-native";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
+import * as SecureStore from "expo-secure-store";
+import * as FileSystem from "expo-file-system/legacy";
+import * as Sharing from "expo-sharing";
 import { api } from "@/src/api";
 import { colors, spacing, radius, sizes } from "@/src/theme";
 import ScreenHeader from "@/src/components/ScreenHeader";
-import { openWhatsApp, prescriptionMessage } from "@/src/utils/whatsapp";
+import { openWhatsApp } from "@/src/utils/whatsapp";
 
 const RX_FIELDS = ["od_sph","od_cyl","od_axis","od_add","os_sph","os_cyl","os_axis","os_add","pd"] as const;
 type RxKey = typeof RX_FIELDS[number];
 
+const BACKEND = process.env.EXPO_PUBLIC_BACKEND_URL;
+
 export default function CustomerDetail() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { id, existing } = useLocalSearchParams<{ id: string; existing?: string }>();
   const router = useRouter();
   const [c, setC] = useState<any>(null);
   const [showRx, setShowRx] = useState(false);
+  const [editRx, setEditRx] = useState<any>(null);
+  const [showEditCust, setShowEditCust] = useState(false);
   const [showReminder, setShowReminder] = useState(false);
   const [aiBusy, setAiBusy] = useState<string | null>(null);
+  const [existingBanner, setExistingBanner] = useState(existing === "1");
+  const [rxSharingId, setRxSharingId] = useState<string | null>(null);
+  const [toast, setToast] = useState("");
+
+  useEffect(() => {
+    if (existingBanner) {
+      const t = setTimeout(() => setExistingBanner(false), 5000);
+      return () => clearTimeout(t);
+    }
+  }, [existingBanner]);
 
   const load = useCallback(async () => {
     try { setC(await api(`/customers/${id}`)); } catch (e) { console.warn(e); }
@@ -40,6 +57,47 @@ export default function CustomerDetail() {
     try { await api(`/customers/${id}`, { method: "DELETE" }); router.back(); } catch (e) { console.warn(e); }
   };
 
+  const shareRxAsPdf = async (rx: any) => {
+    if (!c) return;
+    setRxSharingId(rx.id);
+    setToast("");
+    try {
+      if (Platform.OS === "web") {
+        // Web: get a signed public link, then open WhatsApp with the link
+        const res = await api(`/customers/${id}/prescriptions/${rx.id}/share-link`, { method: "POST" });
+        const link = res?.url;
+        if (!link) throw new Error("Could not create share link");
+        const msg = `Hi ${c.name || ""},\nYour eyewear prescription (PDF): ${link}\n(Link valid for 7 days)`;
+        openWhatsApp(c.phone, msg);
+        setToast("WhatsApp opened — attach or send the PDF link");
+      } else {
+        // Native: download the PDF with auth then use the share sheet
+        let token: string | null = null;
+        try { token = await SecureStore.getItemAsync("opticrm_token"); } catch {}
+        const url = `${BACKEND}/api/customers/${id}/prescriptions/${rx.id}/pdf`;
+        const filename = `Rx-${(c.name || "customer").replace(/\s+/g, "_")}-${rx.date || ""}.pdf`;
+        const dest = `${FileSystem.cacheDirectory}${filename}`;
+        const download = await FileSystem.downloadAsync(url, dest, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        if (await Sharing.isAvailableAsync()) {
+          await Sharing.shareAsync(download.uri, { mimeType: "application/pdf", UTI: "com.adobe.pdf", dialogTitle: "Share prescription" });
+        } else {
+          setToast("Downloaded PDF but sharing not available on this device");
+        }
+      }
+    } catch (e: any) {
+      setToast(e?.message || "Failed to share prescription PDF");
+    } finally {
+      setRxSharingId(null);
+      setTimeout(() => setToast(""), 4500);
+    }
+  };
+
+  const deleteRx = async (rxId: string) => {
+    try { await api(`/customers/${id}/prescriptions/${rxId}`, { method: "DELETE" }); load(); } catch (e) { console.warn(e); }
+  };
+
   if (!c) return (
     <View style={{ flex: 1, backgroundColor: colors.surface }}>
       <ScreenHeader title="Loading…" />
@@ -51,12 +109,23 @@ export default function CustomerDetail() {
       <ScreenHeader
         title={c.name}
         right={
-          <Pressable testID="delete-customer-button" onPress={removeCustomer} hitSlop={10}>
-            <Ionicons name="trash-outline" size={20} color={colors.error} />
-          </Pressable>
+          <View style={{ flexDirection: "row", gap: spacing.md }}>
+            <Pressable testID="edit-customer-button" onPress={() => setShowEditCust(true)} hitSlop={10}>
+              <Ionicons name="create-outline" size={20} color={colors.brand} />
+            </Pressable>
+            <Pressable testID="delete-customer-button" onPress={removeCustomer} hitSlop={10}>
+              <Ionicons name="trash-outline" size={20} color={colors.error} />
+            </Pressable>
+          </View>
         }
       />
       <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: 120 }}>
+        {existingBanner && (
+          <View style={styles.existingBanner} testID="existing-customer-banner">
+            <Ionicons name="information-circle" size={18} color={colors.warning} />
+            <Text style={styles.existingTxt}>A customer with this mobile already exists — showing their record.</Text>
+          </View>
+        )}
         <View style={styles.card}>
           <Row icon="call-outline" text={c.phone} />
           {!!c.email && <Row icon="mail-outline" text={c.email} />}
@@ -88,19 +157,40 @@ export default function CustomerDetail() {
           <View style={styles.emptyRx}><Text style={{ color: colors.muted }}>No prescriptions yet</Text></View>
         )}
 
+        {!!toast && <Text style={styles.toastLine} testID="rx-share-toast">{toast}</Text>}
+
         {(c.prescriptions || []).map((rx: any) => (
           <View key={rx.id} style={styles.rxCard} testID={`rx-card-${rx.id}`}>
             <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
               <Text style={styles.rxDate}>Rx · {rx.date}</Text>
-              <Pressable
-                testID={`whatsapp-rx-${rx.id}`}
-                onPress={() => openWhatsApp(c.phone, prescriptionMessage(c, rx))}
-                style={styles.waRxBtn}
-                hitSlop={6}
-              >
-                <Ionicons name="logo-whatsapp" size={14} color="#fff" />
-                <Text style={styles.waRxTxt}>Send on WhatsApp</Text>
-              </Pressable>
+              <View style={{ flexDirection: "row", gap: 6 }}>
+                <Pressable
+                  testID={`edit-rx-${rx.id}`}
+                  onPress={() => setEditRx(rx)}
+                  style={[styles.rxIconBtn, { backgroundColor: colors.brandSecondary }]}
+                  hitSlop={6}
+                >
+                  <Ionicons name="create-outline" size={14} color="#fff" />
+                </Pressable>
+                <Pressable
+                  testID={`delete-rx-${rx.id}`}
+                  onPress={() => deleteRx(rx.id)}
+                  style={[styles.rxIconBtn, { backgroundColor: colors.error }]}
+                  hitSlop={6}
+                >
+                  <Ionicons name="trash-outline" size={14} color="#fff" />
+                </Pressable>
+                <Pressable
+                  testID={`whatsapp-rx-${rx.id}`}
+                  onPress={() => shareRxAsPdf(rx)}
+                  disabled={rxSharingId === rx.id}
+                  style={[styles.waRxBtn, rxSharingId === rx.id && { opacity: 0.6 }]}
+                  hitSlop={6}
+                >
+                  <Ionicons name="logo-whatsapp" size={14} color="#fff" />
+                  <Text style={styles.waRxTxt}>{rxSharingId === rx.id ? "…" : "Send PDF"}</Text>
+                </Pressable>
+              </View>
             </View>
             <View style={styles.rxGrid}>
               <View style={styles.rxCol}>
@@ -149,13 +239,24 @@ export default function CustomerDetail() {
       </ScrollView>
 
       <RxModal
-        visible={showRx}
-        onClose={() => setShowRx(false)}
+        visible={showRx || !!editRx}
+        initial={editRx}
+        onClose={() => { setShowRx(false); setEditRx(null); }}
         onSave={async (body: any) => {
-          await api(`/customers/${id}/prescriptions`, { method: "POST", body });
-          setShowRx(false);
+          if (editRx) {
+            await api(`/customers/${id}/prescriptions/${editRx.id}`, { method: "PUT", body });
+          } else {
+            await api(`/customers/${id}/prescriptions`, { method: "POST", body });
+          }
+          setShowRx(false); setEditRx(null);
           load();
         }}
+      />
+      <EditCustomerModal
+        visible={showEditCust}
+        customer={c}
+        onClose={() => setShowEditCust(false)}
+        onSaved={() => { setShowEditCust(false); load(); }}
       />
       <ReminderModal
         visible={showReminder}
@@ -181,17 +282,28 @@ function Row({ icon, text }: any) {
   );
 }
 
-function RxModal({ visible, onClose, onSave }: any) {
+function RxModal({ visible, onClose, onSave, initial }: any) {
   const [form, setForm] = useState<any>({ date: new Date().toISOString().slice(0,10) });
+  useEffect(() => {
+    if (initial) {
+      const f: any = { date: initial.date || new Date().toISOString().slice(0,10) };
+      ["od_sph","od_cyl","od_axis","od_add","os_sph","os_cyl","os_axis","os_add","pd","notes","doctor_name","rx_type"].forEach((k) => {
+        if (initial[k] !== undefined && initial[k] !== null) f[k] = String(initial[k]);
+      });
+      setForm(f);
+    } else if (visible) {
+      setForm({ date: new Date().toISOString().slice(0,10) });
+    }
+  }, [initial, visible]);
   const set = (k: string, v: string) => setForm({ ...form, [k]: v });
-  const parseNum = (v: string) => v === "" ? null : Number(v);
+  const parseNum = (v: string) => v === "" || v === undefined ? null : Number(v);
 
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={styles.modalWrap}>
         <View style={styles.modalCard}>
           <View style={styles.modalHeader}>
-            <Text style={styles.modalTitle}>New Prescription</Text>
+            <Text style={styles.modalTitle}>{initial ? "Edit Prescription" : "New Prescription"}</Text>
             <Pressable onPress={onClose}><Ionicons name="close" size={22} color={colors.onSurface} /></Pressable>
           </View>
           <ScrollView contentContainerStyle={{ padding: spacing.lg }}>
@@ -232,7 +344,82 @@ function RxModal({ visible, onClose, onSave }: any) {
               }}
               style={[styles.cta, { marginTop: spacing.lg }]}
             >
-              <Text style={styles.ctaText}>Save Prescription</Text>
+              <Text style={styles.ctaText}>{initial ? "Update Prescription" : "Save Prescription"}</Text>
+            </Pressable>
+          </ScrollView>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
+function EditCustomerModal({ visible, customer, onClose, onSaved }: any) {
+  const [form, setForm] = useState<any>({});
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    if (visible && customer) {
+      setForm({
+        name: customer.name || "",
+        phone: customer.phone || "",
+        email: customer.email || "",
+        address: customer.address || "",
+        dob: customer.dob || "",
+        birthday: customer.birthday || "",
+        anniversary: customer.anniversary || "",
+        gstin: customer.gstin || "",
+        notes: customer.notes || "",
+        branch_id: customer.branch_id || null,
+      });
+      setErr("");
+    }
+  }, [visible, customer]);
+  const set = (k: string, v: any) => setForm((f: any) => ({ ...f, [k]: v }));
+
+  const onSave = async () => {
+    if (!form.name?.trim() || !form.phone?.trim()) { setErr("Name and phone are required"); return; }
+    setBusy(true); setErr("");
+    try {
+      await api(`/customers/${customer.id}`, { method: "PUT", body: form });
+      onSaved();
+    } catch (e: any) { setErr(e?.message || "Failed to update"); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={styles.modalWrap}>
+        <View style={styles.modalCard}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Edit Customer</Text>
+            <Pressable onPress={onClose}><Ionicons name="close" size={22} color={colors.onSurface} /></Pressable>
+          </View>
+          <ScrollView contentContainerStyle={{ padding: spacing.lg }}>
+            {(["name","phone","email","address","dob","birthday","anniversary","gstin","notes"] as const).map((k) => (
+              <View key={k} style={{ marginBottom: spacing.md }}>
+                <Text style={styles.label}>{
+                  k === "dob" ? "Date of birth (YYYY-MM-DD)" :
+                  k === "birthday" ? "Birthday (YYYY-MM-DD)" :
+                  k === "anniversary" ? "Anniversary (YYYY-MM-DD)" :
+                  k === "gstin" ? "GSTIN" :
+                  k[0].toUpperCase() + k.slice(1)
+                }{(k === "name" || k === "phone") ? " *" : ""}</Text>
+                <TextInput
+                  testID={`edit-customer-${k}-input`}
+                  value={form[k] || ""}
+                  onChangeText={(v) => set(k, v)}
+                  style={[styles.input, k === "notes" && { height: 90, textAlignVertical: "top" }]}
+                  multiline={k === "notes"}
+                  autoCapitalize={k === "email" ? "none" : "sentences"}
+                  keyboardType={k === "phone" ? "phone-pad" : k === "email" ? "email-address" : "default"}
+                  placeholder={k === "birthday" || k === "anniversary" || k === "dob" ? "YYYY-MM-DD" : ""}
+                  placeholderTextColor={colors.muted}
+                />
+              </View>
+            ))}
+            {err ? <Text style={{ color: colors.error }} testID="edit-customer-error">{err}</Text> : null}
+            <Pressable testID="save-edit-customer-button" onPress={onSave} disabled={busy} style={[styles.cta, { marginTop: spacing.lg }, busy && { opacity: 0.7 }]}>
+              <Text style={styles.ctaText}>{busy ? "Saving…" : "Update Customer"}</Text>
             </Pressable>
           </ScrollView>
         </View>
@@ -328,4 +515,8 @@ const styles = StyleSheet.create({
   chip: { paddingHorizontal: spacing.md, paddingVertical: 8, borderRadius: 18, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surfaceSecondary },
   waRxBtn: { flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: "#25D366", paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12 },
   waRxTxt: { color: "#fff", fontWeight: "700", fontSize: 11 },
+  rxIconBtn: { width: 26, height: 26, borderRadius: 13, alignItems: "center", justifyContent: "center" },
+  existingBanner: { flexDirection: "row", alignItems: "center", gap: spacing.sm, padding: spacing.md, backgroundColor: colors.warning + "22", borderRadius: radius.md, borderWidth: 1, borderColor: colors.warning + "55", marginBottom: spacing.md },
+  existingTxt: { color: colors.warning, flex: 1, fontSize: sizes.sm, fontWeight: "600" },
+  toastLine: { color: colors.brand, marginTop: spacing.md, textAlign: "center", fontWeight: "700", fontSize: sizes.sm },
 });

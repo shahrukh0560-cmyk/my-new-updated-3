@@ -1,8 +1,9 @@
-import { useCallback, useState } from "react";
-import { View, Text, StyleSheet, ScrollView, Pressable, TextInput, Platform } from "react-native";
+import { useCallback, useState, useEffect } from "react";
+import { View, Text, StyleSheet, ScrollView, Pressable, TextInput, Platform, Modal, KeyboardAvoidingView } from "react-native";
 import { useFocusEffect, useLocalSearchParams } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { api } from "@/src/api";
+import { useAuth } from "@/src/auth";
 import { colors, spacing, radius, sizes } from "@/src/theme";
 import ScreenHeader from "@/src/components/ScreenHeader";
 import { openWhatsApp, orderSummaryMessage } from "@/src/utils/whatsapp";
@@ -36,10 +37,12 @@ const STATUS_COLORS: any = {
 
 export default function OrderDetail() {
   const { id } = useLocalSearchParams<{ id: string }>();
+  const { user } = useAuth() as any;
   const [o, setO] = useState<any>(null);
   const [pay, setPay] = useState("");
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState("");
+  const [showEdit, setShowEdit] = useState(false);
 
   const load = useCallback(async () => {
     try { setO(await api(`/orders/${id}`)); } catch (e) { console.warn(e); }
@@ -57,6 +60,20 @@ export default function OrderDetail() {
     setBusy(true);
     try { await api(`/orders/${id}/status`, { method: "POST", body: { status } }); load(); } catch (e) { console.warn(e); }
     finally { setBusy(false); }
+  };
+
+  const sendReviewRequest = () => {
+    if (!o) return;
+    const reviewUrl = user?.google_review_url || "";
+    const biz = user?.business_name || "our store";
+    if (!reviewUrl) {
+      setToast("Add your Google review URL in Settings first.");
+      setTimeout(() => setToast(""), 4000);
+      return;
+    }
+    const first = (o.customer_name || "").split(" ")[0] || "there";
+    const msg = `Hi ${first}! Thank you for choosing ${biz}. If you loved our service, could you spare 30s to leave us a Google review? ⭐️\n${reviewUrl}`;
+    openWhatsApp(o.customer_phone, msg);
   };
 
   const shareInvoice = async () => {
@@ -91,6 +108,9 @@ export default function OrderDetail() {
         title={`${o.invoice_no || "Order"}`}
         right={
           <View style={{ flexDirection: "row", gap: spacing.md }}>
+            <Pressable testID="edit-order-button" onPress={() => setShowEdit(true)} hitSlop={10}>
+              <Ionicons name="create-outline" size={20} color={colors.brand} />
+            </Pressable>
             <Pressable
               testID="whatsapp-order-button"
               onPress={() => openWhatsApp(o.customer_phone, orderSummaryMessage(o))}
@@ -214,9 +234,130 @@ export default function OrderDetail() {
           </View>
         )}
 
+        {o.fulfillment_status === "delivered" && (
+          <Pressable
+            testID="send-review-request"
+            onPress={sendReviewRequest}
+            style={[styles.reviewBtn]}
+          >
+            <Ionicons name="star" size={18} color="#fff" />
+            <Text style={styles.reviewTxt}>Ask for Google Review on WhatsApp</Text>
+          </Pressable>
+        )}
+
         {!!toast && <Text style={styles.toast} testID="invoice-toast">{toast}</Text>}
       </ScrollView>
+
+      <OrderEditModal
+        visible={showEdit}
+        order={o}
+        onClose={() => setShowEdit(false)}
+        onSaved={() => { setShowEdit(false); load(); }}
+      />
     </View>
+  );
+}
+
+function OrderEditModal({ visible, order, onClose, onSaved }: any) {
+  const [form, setForm] = useState<any>({});
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    if (visible && order) {
+      setForm({
+        discount: String(order.discount ?? 0),
+        notes: order.notes || "",
+        customer_address: order.customer_address || "",
+        customer_gstin: order.customer_gstin || "",
+        expected_delivery_date: order.expected_delivery_date || "",
+      });
+      setErr("");
+    }
+  }, [visible, order]);
+  const set = (k: string, v: any) => setForm((f: any) => ({ ...f, [k]: v }));
+
+  const onSave = async () => {
+    setBusy(true); setErr("");
+    try {
+      const body: any = {
+        discount: Number(form.discount) || 0,
+        notes: form.notes || "",
+        customer_address: form.customer_address || "",
+        customer_gstin: form.customer_gstin || "",
+        expected_delivery_date: form.expected_delivery_date || "",
+      };
+      await api(`/orders/${order.id}`, { method: "PATCH", body });
+      onSaved();
+    } catch (e: any) { setErr(e?.message || "Failed to update order"); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={styles.modalWrap}>
+        <View style={styles.modalCard}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Edit Order</Text>
+            <Pressable onPress={onClose}><Ionicons name="close" size={22} color={colors.onSurface} /></Pressable>
+          </View>
+          <ScrollView contentContainerStyle={{ padding: spacing.lg }}>
+            <Text style={styles.editLabel}>Discount (₹)</Text>
+            <TextInput
+              testID="edit-order-discount"
+              value={form.discount}
+              onChangeText={(v) => set("discount", v)}
+              keyboardType="numeric"
+              style={styles.input}
+              placeholderTextColor={colors.muted}
+            />
+            <Text style={[styles.editLabel, { marginTop: spacing.md }]}>Notes</Text>
+            <TextInput
+              testID="edit-order-notes"
+              value={form.notes}
+              onChangeText={(v) => set("notes", v)}
+              style={[styles.input, { height: 80, textAlignVertical: "top" }]}
+              multiline
+              placeholderTextColor={colors.muted}
+            />
+            <Text style={[styles.editLabel, { marginTop: spacing.md }]}>Customer address (for invoice)</Text>
+            <TextInput
+              testID="edit-order-address"
+              value={form.customer_address}
+              onChangeText={(v) => set("customer_address", v)}
+              style={styles.input}
+              placeholderTextColor={colors.muted}
+            />
+            <Text style={[styles.editLabel, { marginTop: spacing.md }]}>Customer GSTIN</Text>
+            <TextInput
+              testID="edit-order-gstin"
+              value={form.customer_gstin}
+              onChangeText={(v) => set("customer_gstin", v)}
+              autoCapitalize="characters"
+              style={styles.input}
+              placeholderTextColor={colors.muted}
+            />
+            <Text style={[styles.editLabel, { marginTop: spacing.md }]}>Expected delivery date (YYYY-MM-DD)</Text>
+            <TextInput
+              testID="edit-order-expected-date"
+              value={form.expected_delivery_date}
+              onChangeText={(v) => set("expected_delivery_date", v)}
+              style={styles.input}
+              placeholder="YYYY-MM-DD"
+              placeholderTextColor={colors.muted}
+            />
+            {err ? <Text style={{ color: colors.error, marginTop: spacing.sm }}>{err}</Text> : null}
+            <Pressable
+              testID="save-order-edit-button"
+              onPress={onSave}
+              disabled={busy}
+              style={[styles.cta, { marginTop: spacing.lg, flexDirection: "row", justifyContent: "center" }, busy && { opacity: 0.7 }]}
+            >
+              <Text style={styles.ctaText}>{busy ? "Saving…" : "Update Order"}</Text>
+            </Pressable>
+          </ScrollView>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
   );
 }
 
@@ -321,4 +462,11 @@ const styles = StyleSheet.create({
   tlTitle: { fontSize: sizes.sm, fontWeight: "700", color: colors.onSurface },
   tlSub: { fontSize: 11, color: colors.muted, marginTop: 2 },
   toast: { textAlign: "center", color: colors.brand, marginTop: spacing.md },
+  reviewBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: spacing.sm, backgroundColor: "#F59E0B", padding: spacing.md, borderRadius: radius.md, marginTop: spacing.md },
+  reviewTxt: { color: "#fff", fontWeight: "700", fontSize: sizes.base },
+  modalWrap: { flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(0,0,0,0.4)" },
+  modalCard: { backgroundColor: colors.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24, maxHeight: "92%" },
+  modalHeader: { padding: spacing.lg, flexDirection: "row", justifyContent: "space-between", alignItems: "center", borderBottomWidth: 1, borderBottomColor: colors.border },
+  modalTitle: { fontSize: sizes.xl, fontWeight: "700", color: colors.onSurface },
+  editLabel: { fontSize: sizes.sm, fontWeight: "600", color: colors.onSurfaceSecondary, marginBottom: spacing.xs },
 });
