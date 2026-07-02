@@ -43,18 +43,45 @@ export default function Subscription() {
           <View style={styles.currentCard} testID="current-plan-card">
             <Text style={styles.currentLabel}>Current Plan</Text>
             <Text style={styles.currentName}>{me.plan.name}</Text>
-            <Text style={styles.currentPrice}>{me.plan.price > 0 ? `₹${me.plan.price} / month` : `Free · ${me.plan.trial_days} days trial`}</Text>
-            {me.expires_at && <Text style={styles.currentExp}>Renews / expires {new Date(me.expires_at).toLocaleDateString()}</Text>}
+            <Text style={styles.currentPrice}>{
+              me.plan.price > 0
+                ? `₹${me.plan.price} / ${me.plan.billing_cycle === "yearly" ? "year" : "month"}`
+                : (me.plan.id === "trial" ? `Free · ${me.plan.trial_days} days trial` : "Free forever")
+            }</Text>
+            {me.expires_at && me.plan.id !== "standard" && <Text style={styles.currentExp}>Renews / expires {new Date(me.expires_at).toLocaleDateString()}</Text>}
           </View>
         )}
 
         {plans.map((p) => {
           const isCurrent = me?.plan_id === p.id;
+          const isYearly = p.billing_cycle === "yearly";
+          const isBestValue = p.id === "premium_pro_yearly";
           return (
-            <View key={p.id} style={[styles.planCard, isCurrent && { borderColor: colors.brand, borderWidth: 2 }]} testID={`plan-${p.id}`}>
+            <View
+              key={p.id}
+              style={[styles.planCard, isCurrent && { borderColor: colors.brand, borderWidth: 2 }, isBestValue && !isCurrent && { borderColor: "#F59E0B", borderWidth: 2 }]}
+              testID={`plan-${p.id}`}
+            >
+              {isBestValue && (
+                <View style={styles.badge}>
+                  <Ionicons name="star" size={11} color="#fff" />
+                  <Text style={styles.badgeTxt}>Best Value · Save ₹2,389</Text>
+                </View>
+              )}
               <View style={styles.planHeader}>
-                <Text style={styles.planName}>{p.name}</Text>
-                <Text style={styles.planPrice}>{p.price > 0 ? `₹${p.price}` : "Free"}<Text style={styles.planPriceUnit}>{p.price > 0 ? " /mo" : ""}</Text></Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.planName}>{p.name}</Text>
+                  {p.tagline ? <Text style={styles.planTagline}>{p.tagline}</Text> : null}
+                </View>
+                <View style={{ alignItems: "flex-end" }}>
+                  <Text style={styles.planPrice}>
+                    {p.price > 0 ? `₹${p.price}` : "Free"}
+                    <Text style={styles.planPriceUnit}>{p.price > 0 ? (isYearly ? " /year" : " /mo") : ""}</Text>
+                  </Text>
+                  {p.id === "premium_pro_yearly" && (
+                    <Text style={styles.planStrike}>₹5,988</Text>
+                  )}
+                </View>
               </View>
               {p.features.map((f: string, i: number) => (
                 <View key={i} style={styles.featRow}>
@@ -66,10 +93,10 @@ export default function Subscription() {
                 testID={`subscribe-${p.id}`}
                 disabled={busy === p.id || isCurrent}
                 onPress={() => choose(p.id)}
-                style={[styles.choose, isCurrent && { backgroundColor: colors.surfaceTertiary }, busy === p.id && { opacity: 0.7 }]}
+                style={[styles.choose, isCurrent && { backgroundColor: colors.surfaceTertiary }, busy === p.id && { opacity: 0.7 }, isBestValue && !isCurrent && { backgroundColor: "#F59E0B" }]}
               >
                 <Text style={[styles.chooseTxt, isCurrent && { color: colors.muted }]}>
-                  {isCurrent ? "Active" : busy === p.id ? "Activating…" : (p.price > 0 ? "Subscribe (Mock)" : "Start Free Trial")}
+                  {isCurrent ? "Active" : busy === p.id ? "Activating…" : (p.cta || (p.price > 0 ? "Subscribe" : "Get started"))}
                 </Text>
               </Pressable>
             </View>
@@ -102,11 +129,15 @@ const styles = StyleSheet.create({
   currentName: { color: "#fff", fontSize: sizes.xxxl, fontWeight: "800", marginTop: 4 },
   currentPrice: { color: "#fff", fontSize: sizes.lg, marginTop: 4 },
   currentExp: { color: colors.brandSecondary, fontSize: sizes.sm, marginTop: spacing.sm },
-  planCard: { backgroundColor: colors.surfaceSecondary, padding: spacing.lg, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, marginBottom: spacing.md },
-  planHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "baseline", marginBottom: spacing.md },
+  planCard: { backgroundColor: colors.surfaceSecondary, padding: spacing.lg, borderRadius: radius.md, borderWidth: 1, borderColor: colors.border, marginBottom: spacing.md, position: "relative" },
+  badge: { position: "absolute", top: -12, left: spacing.md, flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: "#F59E0B", paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12, zIndex: 2 },
+  badgeTxt: { color: "#fff", fontWeight: "700", fontSize: 11 },
+  planHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", marginBottom: spacing.md, gap: spacing.sm },
   planName: { fontSize: sizes.xl, fontWeight: "700", color: colors.onSurface },
+  planTagline: { fontSize: sizes.sm, color: colors.muted, marginTop: 4 },
   planPrice: { fontSize: sizes.xxl, fontWeight: "800", color: colors.brand },
   planPriceUnit: { fontSize: sizes.sm, color: colors.muted, fontWeight: "500" },
+  planStrike: { fontSize: sizes.sm, color: colors.muted, textDecorationLine: "line-through", marginTop: 2 },
   featRow: { flexDirection: "row", alignItems: "center", gap: spacing.sm, paddingVertical: 4 },
   feat: { color: colors.onSurfaceSecondary, fontSize: sizes.base },
   choose: { marginTop: spacing.md, padding: spacing.md, backgroundColor: colors.brand, borderRadius: radius.md, alignItems: "center" },

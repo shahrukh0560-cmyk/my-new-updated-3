@@ -20,7 +20,7 @@ export default function NewInventory() {
   const [form, setForm] = useState<any>({
     name: "", brand: "", model: "", color: "", shape: "", material: "",
     lens_index: "", blue_cut: false, photochromic: false, progressive_lens: false, coatings: "",
-    price: "", cost: "", mrp: "", gst_rate: "12", hsn_code: "9004",
+    price: "", cost: "", mrp: "", gst_rate: "5", hsn_code: "9004",
     stock: "", low_stock_threshold: "3", rack_location: "", supplier: "", warranty_months: "12",
     sku: "", barcode: "",
   });
@@ -54,7 +54,7 @@ export default function NewInventory() {
           blue_cut: !!form.blue_cut, photochromic: !!form.photochromic, progressive_lens: !!form.progressive_lens,
           coatings: form.coatings,
           price: Number(form.price) || 0, cost: Number(form.cost) || 0, mrp: form.mrp ? Number(form.mrp) : null,
-          gst_rate: Number(form.gst_rate) || 12, hsn_code: form.hsn_code || "9004",
+          gst_rate: Number(form.gst_rate) || 5, hsn_code: form.hsn_code || "9004",
           stock: parseInt(form.stock, 10) || 0,
           low_stock_threshold: parseInt(form.low_stock_threshold, 10) || 3,
           rack_location: form.rack_location, supplier: form.supplier,

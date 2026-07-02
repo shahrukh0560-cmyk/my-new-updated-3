@@ -23,6 +23,7 @@ const TILES = [
   { key: "staff", icon: "people-outline", label: "Staff & Users", color: colors.brandSecondary, route: "/staff", adminOnly: true },
   { key: "data", icon: "swap-vertical-outline", label: "Import / Export", color: "#7C57B5", route: "/data", adminOnly: true },
   { key: "reports", icon: "analytics-outline", label: "Reports & GST", color: colors.success, route: "/reports" },
+  { key: "gst-report", icon: "document-text-outline", label: "GST-Ready Report", color: colors.success, route: "/reports/gst" },
   { key: "subscription", icon: "diamond-outline", label: "Subscription", color: colors.warning, route: "/subscription" },
   { key: "scanner", icon: "qr-code-outline", label: "Barcode Scan", color: colors.brand, route: "/scanner?mode=lookup" },
   { key: "reminders", icon: "chatbubble-ellipses-outline", label: "Reminders Log", color: colors.brandSecondary, route: "/reminders" },

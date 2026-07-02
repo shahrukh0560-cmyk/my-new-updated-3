@@ -6,6 +6,7 @@ import { api } from "@/src/api";
 import { useBranch } from "@/src/branch";
 import { colors, spacing, radius, sizes } from "@/src/theme";
 import ScreenHeader from "@/src/components/ScreenHeader";
+import DateField from "@/src/components/DateField";
 
 export default function NewRepair() {
   const router = useRouter();
@@ -117,7 +118,7 @@ export default function NewRepair() {
         </View>
 
         <Text style={styles.label}>Expected delivery date</Text>
-        <TextInput testID="repair-expected-date" value={form.expected_date} onChangeText={(v) => setForm({ ...form, expected_date: v })} style={styles.input} placeholder="YYYY-MM-DD" placeholderTextColor={colors.muted} />
+        <DateField testID="repair-expected-date" value={form.expected_date} onChange={(v) => setForm({ ...form, expected_date: v })} />
 
         <Text style={styles.label}>Notes</Text>
         <TextInput testID="repair-notes" value={form.notes} onChangeText={(v) => setForm({ ...form, notes: v })} style={[styles.input, { height: 70, textAlignVertical: "top" }]} multiline />

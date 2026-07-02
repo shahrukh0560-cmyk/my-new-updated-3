@@ -42,6 +42,17 @@ async function rawFetch(path: string, method: string, body?: any) {
   let data: any = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = text; }
   if (!res.ok) {
+    // 402: Plan upgrade required → open the global paywall modal.
+    if (res.status === 402) {
+      const info = (data && data.detail && typeof data.detail === "object") ? data.detail : (data || {});
+      try {
+        const handle: any = (globalThis as any).__opticrmPaywall;
+        if (handle?.open) handle.open(info);
+      } catch {}
+      const upErr: any = new Error(info?.message || "Upgrade required");
+      upErr.paywall = info;
+      throw upErr;
+    }
     const msg = (data && (data.detail || data.message)) || `HTTP ${res.status}`;
     throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
   }

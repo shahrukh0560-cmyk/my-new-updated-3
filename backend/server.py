@@ -27,7 +27,7 @@ JWT_EXPIRE_HOURS = int(os.environ.get("JWT_EXPIRE_HOURS", "168"))
 ADMIN_EMAIL = os.environ["ADMIN_EMAIL"]
 ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY", "")
-DEFAULT_GST_RATE = float(os.environ.get("DEFAULT_GST_RATE", "12"))  # eyewear in India = 12%
+DEFAULT_GST_RATE = float(os.environ.get("DEFAULT_GST_RATE", "5"))  # eyewear in India = 5%
 
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
@@ -309,17 +309,200 @@ class ReminderIn(BaseModel):
     message: str
 
 
-# Subscription
+# Subscription — 5 plans + feature gating
 SUB_PLANS = {
-    "trial": {"id": "trial", "name": "Free Trial", "price": 0, "trial_days": 14, "features": ["1 branch", "100 customers", "Core CRM"]},
-    "starter": {"id": "starter", "name": "Starter", "price": 499, "trial_days": 0, "features": ["1 branch", "500 customers", "GST Invoices", "Reports"]},
-    "pro": {"id": "pro", "name": "Professional", "price": 1499, "trial_days": 0, "features": ["5 branches", "Unlimited customers", "AI summaries", "WhatsApp marketing"]},
-    "enterprise": {"id": "enterprise", "name": "Enterprise", "price": 4999, "trial_days": 0, "features": ["Unlimited branches", "Multi-staff RBAC", "Priority support", "Custom integrations"]},
+    "trial": {
+        "id": "trial", "name": "14-Day Free Trial", "price": 0, "currency": "INR",
+        "billing_cycle": "trial", "duration_days": 14, "trial_days": 14, "cta": "Start free trial",
+        "tagline": "Full access, no credit card required",
+        "features": ["All Premium Pro features", "Unlimited customers", "Multi-branch", "Staff users", "Advanced AI Copilot", "Bulk barcode print", "GST reports", "Prescription PDF"],
+    },
+    "standard": {
+        "id": "standard", "name": "Standard", "price": 0, "currency": "INR",
+        "billing_cycle": "free", "duration_days": 3650, "trial_days": 0, "cta": "Free forever",
+        "tagline": "Basic CRM, free forever",
+        "features": ["Up to 100 customers", "Up to 30 inventory items", "Up to 20 orders / month", "Single branch", "Single user", "Basic reports"],
+    },
+    "premium_monthly": {
+        "id": "premium_monthly", "name": "Premium Monthly", "price": 299, "currency": "INR",
+        "billing_cycle": "monthly", "duration_days": 30, "trial_days": 0, "cta": "Upgrade to Premium",
+        "tagline": "Everything unlimited",
+        "features": ["Unlimited customers", "Unlimited inventory", "Unlimited orders", "GST reports", "Basic AI Copilot", "Prescription PDF + WhatsApp", "Bulk barcode print", "Priority email support"],
+    },
+    "premium_pro_monthly": {
+        "id": "premium_pro_monthly", "name": "Premium Pro Monthly", "price": 499, "currency": "INR",
+        "billing_cycle": "monthly", "duration_days": 30, "trial_days": 0, "cta": "Upgrade to Pro",
+        "tagline": "Multi-Branch + Staff + Advanced AI",
+        "features": ["Everything in Premium", "Multi-branch", "Staff users (RBAC)", "Advanced AI Copilot (Actions)", "Manage All Branches dashboard", "WhatsApp campaigns", "Referral program analytics"],
+    },
+    "premium_pro_yearly": {
+        "id": "premium_pro_yearly", "name": "Premium Pro Yearly", "price": 3599, "currency": "INR",
+        "billing_cycle": "yearly", "duration_days": 365, "trial_days": 0, "cta": "Get Yearly Plan",
+        "tagline": "≈ 2 months free · Save ₹2,389",
+        "badge": "Best Value",
+        "features": ["Everything in Pro Monthly", "2 months free (₹3,599 vs ₹5,988)", "Locked-in yearly pricing"],
+    },
+}
+
+# Feature key → list of plan ids that unlock it. If a plan is not in the list, the feature is BLOCKED for that plan.
+FEATURE_ACCESS: Dict[str, List[str]] = {
+    "unlimited_customers": ["trial", "premium_monthly", "premium_pro_monthly", "premium_pro_yearly"],
+    "unlimited_inventory": ["trial", "premium_monthly", "premium_pro_monthly", "premium_pro_yearly"],
+    "unlimited_orders": ["trial", "premium_monthly", "premium_pro_monthly", "premium_pro_yearly"],
+    "gst_reports": ["trial", "premium_monthly", "premium_pro_monthly", "premium_pro_yearly"],
+    "prescription_pdf": ["trial", "premium_monthly", "premium_pro_monthly", "premium_pro_yearly"],
+    "bulk_barcode": ["trial", "premium_monthly", "premium_pro_monthly", "premium_pro_yearly"],
+    "copilot_query": ["trial", "premium_monthly", "premium_pro_monthly", "premium_pro_yearly"],
+    "multi_branch": ["trial", "premium_pro_monthly", "premium_pro_yearly"],
+    "staff_users": ["trial", "premium_pro_monthly", "premium_pro_yearly"],
+    "copilot_actions": ["trial", "premium_pro_monthly", "premium_pro_yearly"],
+    "manage_all_branches": ["trial", "premium_pro_monthly", "premium_pro_yearly"],
+    "referral_program": ["trial", "premium_pro_monthly", "premium_pro_yearly"],
+    "whatsapp_campaigns": ["trial", "premium_pro_monthly", "premium_pro_yearly"],
+}
+
+STANDARD_LIMITS = {
+    "customers": 100,
+    "inventory": 30,
+    "orders_per_month": 20,
+    "branches": 1,
+    "staff": 1,
 }
 
 
 class SubscriptionStartIn(BaseModel):
-    plan_id: Literal["trial", "starter", "pro", "enterprise"]
+    plan_id: Literal["trial", "standard", "premium_monthly", "premium_pro_monthly", "premium_pro_yearly"]
+
+
+async def get_active_plan(user: dict) -> Dict[str, Any]:
+    """Returns the OWNER's currently active plan record. Auto-provisions a 14-day trial for new tenants.
+    Auto-expires plans past their expires_at date (falls back to 'standard' free forever)."""
+    oid = current_owner_id(user) or user["id"]
+    sub = await db.subscriptions.find_one({"user_id": oid}, {"_id": 0})
+    if not sub:
+        sub = {
+            "id": str(uuid.uuid4()),
+            "user_id": oid,
+            "plan_id": "trial",
+            "status": "active",
+            "started_at": now_utc(),
+            "expires_at": now_utc() + timedelta(days=14),
+            "auto_renew": False,
+            "billing_history": [],
+        }
+        await db.subscriptions.insert_one(sub.copy())
+        sub.pop("_id", None)
+    # Auto-expire: if trial/paid plan is past expiry, drop to 'standard' free tier.
+    exp = sub.get("expires_at")
+    if exp and isinstance(exp, datetime):
+        # Ensure both sides are timezone-aware
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        if exp < now_utc() and sub.get("plan_id") != "standard":
+            await db.subscriptions.update_one(
+                {"user_id": oid},
+                {"$set": {
+                    "plan_id": "standard",
+                    "status": "active",
+                    "started_at": now_utc(),
+                    "expires_at": now_utc() + timedelta(days=3650),
+                    "auto_renew": False,
+                }},
+            )
+            sub["plan_id"] = "standard"
+            sub["expires_at"] = now_utc() + timedelta(days=3650)
+    return sub
+
+
+def plan_features(plan_id: str) -> List[str]:
+    """Returns the list of feature keys unlocked by a given plan."""
+    return [feat for feat, allowed_plans in FEATURE_ACCESS.items() if plan_id in allowed_plans]
+
+
+async def user_has_feature(user: dict, feature_key: str) -> bool:
+    if user.get("role") == "super_admin":
+        return True
+    sub = await get_active_plan(user)
+    return sub.get("plan_id") in FEATURE_ACCESS.get(feature_key, [])
+
+
+async def require_plan_feature(user: dict, feature_key: str) -> None:
+    """Raises HTTPException 402 (Payment Required) with plan info if the user's plan doesn't include the feature."""
+    if user.get("role") == "super_admin":
+        return
+    sub = await get_active_plan(user)
+    current = sub.get("plan_id") or "standard"
+    allowed = FEATURE_ACCESS.get(feature_key, [])
+    if current not in allowed:
+        # Recommend the cheapest plan that unlocks this feature
+        recommended = next((p for p in ["premium_monthly", "premium_pro_monthly", "premium_pro_yearly"] if p in allowed), (allowed[0] if allowed else "premium_pro_monthly"))
+        rec_plan = SUB_PLANS.get(recommended) or {}
+        raise HTTPException(status_code=402, detail={
+            "error": "plan_upgrade_required",
+            "feature": feature_key,
+            "current_plan": current,
+            "current_plan_name": (SUB_PLANS.get(current) or {}).get("name", current),
+            "required_plan": recommended,
+            "required_plan_name": rec_plan.get("name", recommended),
+            "required_plan_price": rec_plan.get("price"),
+            "message": f"This feature requires the {rec_plan.get('name', recommended)} plan.",
+        })
+
+
+async def enforce_standard_limits(user: dict, kind: str) -> None:
+    """For the Standard (free forever) plan, enforce hard usage limits."""
+    if user.get("role") == "super_admin":
+        return
+    sub = await get_active_plan(user)
+    if sub.get("plan_id") != "standard":
+        return
+    tf = tenant_filter(user)
+    if kind == "customer":
+        cnt = await db.customers.count_documents(tf)
+        if cnt >= STANDARD_LIMITS["customers"]:
+            raise HTTPException(status_code=402, detail={
+                "error": "plan_limit_reached", "feature": "unlimited_customers",
+                "current_plan": "standard", "current_plan_name": "Standard",
+                "required_plan": "premium_monthly", "required_plan_name": "Premium Monthly", "required_plan_price": 299,
+                "message": f"Standard plan is limited to {STANDARD_LIMITS['customers']} customers. Upgrade to add more.",
+            })
+    elif kind == "inventory":
+        cnt = await db.inventory.count_documents(tf)
+        if cnt >= STANDARD_LIMITS["inventory"]:
+            raise HTTPException(status_code=402, detail={
+                "error": "plan_limit_reached", "feature": "unlimited_inventory",
+                "current_plan": "standard", "current_plan_name": "Standard",
+                "required_plan": "premium_monthly", "required_plan_name": "Premium Monthly", "required_plan_price": 299,
+                "message": f"Standard plan is limited to {STANDARD_LIMITS['inventory']} inventory items. Upgrade to add more.",
+            })
+    elif kind == "order":
+        since = now_utc() - timedelta(days=30)
+        cnt = await db.orders.count_documents({**tf, "created_at": {"$gte": since}})
+        if cnt >= STANDARD_LIMITS["orders_per_month"]:
+            raise HTTPException(status_code=402, detail={
+                "error": "plan_limit_reached", "feature": "unlimited_orders",
+                "current_plan": "standard", "current_plan_name": "Standard",
+                "required_plan": "premium_monthly", "required_plan_name": "Premium Monthly", "required_plan_price": 299,
+                "message": f"Standard plan is limited to {STANDARD_LIMITS['orders_per_month']} orders per month. Upgrade for unlimited.",
+            })
+    elif kind == "branch":
+        cnt = await db.branches.count_documents(tf)
+        if cnt >= STANDARD_LIMITS["branches"]:
+            raise HTTPException(status_code=402, detail={
+                "error": "plan_limit_reached", "feature": "multi_branch",
+                "current_plan": "standard", "current_plan_name": "Standard",
+                "required_plan": "premium_pro_monthly", "required_plan_name": "Premium Pro Monthly", "required_plan_price": 499,
+                "message": "Standard plan is limited to 1 branch. Upgrade to Pro for multi-branch.",
+            })
+    elif kind == "staff":
+        cnt = await db.users.count_documents({**tf, "role": {"$in": ["admin", "staff"]}})
+        if cnt >= STANDARD_LIMITS["staff"]:
+            raise HTTPException(status_code=402, detail={
+                "error": "plan_limit_reached", "feature": "staff_users",
+                "current_plan": "standard", "current_plan_name": "Standard",
+                "required_plan": "premium_pro_monthly", "required_plan_name": "Premium Pro Monthly", "required_plan_price": 499,
+                "message": "Standard plan is limited to 1 user. Upgrade to Pro to add staff.",
+            })
 
 
 # Super-Admin
@@ -328,7 +511,7 @@ class TenantStatusIn(BaseModel):
 
 
 class TenantPlanIn(BaseModel):
-    plan_id: Literal["trial", "starter", "pro", "enterprise"]
+    plan_id: Literal["trial", "standard", "premium_monthly", "premium_pro_monthly", "premium_pro_yearly"]
     days: Optional[int] = 30
 
 
@@ -492,6 +675,11 @@ async def me(user: dict = Depends(get_current_user)):
         {"id": oid},
         {"_id": 0, "country": 1, "currency": 1, "currency_symbol": 1, "locale": 1, "google_review_url": 1, "business_name": 1, "business_logo_url": 1, "business_address": 1},
     ) or {}
+    # Attach plan + feature list so the frontend can gate UI upfront
+    sub = await get_active_plan(user)
+    plan_id = sub.get("plan_id") or "standard"
+    features = plan_features(plan_id)
+    plan = SUB_PLANS.get(plan_id) or {}
     return {
         **user,
         "country": owner.get("country") or user.get("country") or "IN",
@@ -502,6 +690,10 @@ async def me(user: dict = Depends(get_current_user)):
         "business_name": owner.get("business_name") or user.get("business_name") or "",
         "business_logo_url": owner.get("business_logo_url") or "",
         "business_address": owner.get("business_address") or "",
+        "plan_id": plan_id,
+        "plan_name": plan.get("name", plan_id),
+        "plan_expires_at": sub.get("expires_at"),
+        "plan_features": features,
     }
 
 
@@ -536,6 +728,11 @@ async def list_branches(user: dict = Depends(get_current_user)):
 
 @api.post("/branches")
 async def create_branch(body: BranchIn, user: dict = Depends(require_roles("super_admin", "owner", "admin"))):
+    # First branch is free on any plan. Second and beyond require the multi_branch feature.
+    existing_count = await db.branches.count_documents(tenant_filter(user))
+    if existing_count >= 1:
+        await require_plan_feature(user, "multi_branch")
+    await enforce_standard_limits(user, "branch")
     b = {"id": str(uuid.uuid4()), **body.model_dump(), "owner_id": current_owner_id(user), "created_at": now_utc()}
     await db.branches.insert_one(b.copy())
     return doc(b)
@@ -573,6 +770,7 @@ async def list_customers(q: Optional[str] = None, branch_id: Optional[str] = Non
 
 @api.post("/customers")
 async def create_customer(body: CustomerIn, user: dict = Depends(get_current_user)):
+    await enforce_standard_limits(user, "customer")
     # Dedupe by mobile: if a customer with the same normalized phone exists in this tenant,
     # return the existing customer instead of creating a duplicate.
     norm = _norm_phone(body.phone)
@@ -758,6 +956,7 @@ async def find_by_barcode(code: str, user: dict = Depends(get_current_user)):
 
 @api.post("/inventory")
 async def create_item(body: InventoryIn, user: dict = Depends(get_current_user)):
+    await enforce_standard_limits(user, "inventory")
     payload = body.model_dump()
     if payload.get("gst_rate") is None:
         payload["gst_rate"] = DEFAULT_GST_RATE
@@ -788,6 +987,7 @@ async def delete_item(iid: str, user: dict = Depends(get_current_user)):
 # ---------- Orders ----------
 @api.post("/orders")
 async def create_order(body: OrderIn, user: dict = Depends(get_current_user)):
+    await enforce_standard_limits(user, "order")
     oid = current_owner_id(user)
     customer = await db.customers.find_one(tenant_filter(user, {"id": body.customer_id}), {"_id": 0})
     if not customer:
@@ -1109,6 +1309,7 @@ async def report_sales(start: Optional[str] = None, end: Optional[str] = None, b
 
 @api.get("/reports/gst")
 async def report_gst(start: Optional[str] = None, end: Optional[str] = None, user: dict = Depends(get_current_user)):
+    await require_plan_feature(user, "gst_reports")
     q: Dict[str, Any] = tenant_filter(user)
     if start or end:
         rng = {}
@@ -1120,20 +1321,63 @@ async def report_gst(start: Optional[str] = None, end: Optional[str] = None, use
     orders = await db.orders.find(q, {"_id": 0}).to_list(5000)
     # bucket by HSN/GST rate
     buckets: Dict[str, Dict[str, float]] = {}
+    total_orders = len(orders)
+    total_taxable = 0.0
+    total_gst = 0.0
+    total_cgst = 0.0
+    total_sgst = 0.0
+    total_igst = 0.0
     for o in orders:
+        # interstate = customer GSTIN state != business state (best-effort: IGST if customer_gstin starts with a different 2-digit code)
+        interstate = False
+        biz_gstin = ""  # left blank — IGST logic conservative; treat everything as intra-state by default
+        cust_gstin = (o.get("customer_gstin") or "")
+        if biz_gstin and cust_gstin and biz_gstin[:2] != cust_gstin[:2]:
+            interstate = True
         for line in o.get("lines", []):
-            key = f"{line.get('hsn_code', '9004')}@{line.get('gst_rate', DEFAULT_GST_RATE)}"
-            b = buckets.setdefault(key, {"hsn_code": line.get("hsn_code", "9004"), "gst_rate": line.get("gst_rate", DEFAULT_GST_RATE), "taxable": 0, "gst": 0, "lines": 0})
+            rate = float(line.get("gst_rate", DEFAULT_GST_RATE) or 0)
+            key = f"{line.get('hsn_code', '9004')}@{rate}"
+            b = buckets.setdefault(key, {"hsn_code": line.get("hsn_code", "9004"), "gst_rate": rate, "taxable": 0.0, "cgst": 0.0, "sgst": 0.0, "igst": 0.0, "gst": 0.0, "lines": 0, "quantity": 0})
             line_sub = float(line.get("price", 0)) * int(line.get("quantity", 0))
+            gst_amt = float(line.get("gst_amount", 0))
             b["taxable"] += line_sub
-            b["gst"] += float(line.get("gst_amount", 0))
+            b["gst"] += gst_amt
+            if interstate:
+                b["igst"] += gst_amt
+                total_igst += gst_amt
+            else:
+                half = gst_amt / 2
+                b["cgst"] += half
+                b["sgst"] += half
+                total_cgst += half
+                total_sgst += half
             b["lines"] += 1
-    rows = [{"key": k, **v, "taxable": round(v["taxable"], 2), "gst": round(v["gst"], 2)} for k, v in buckets.items()]
+            b["quantity"] += int(line.get("quantity", 0))
+            total_taxable += line_sub
+            total_gst += gst_amt
+    rows = [
+        {
+            "key": k,
+            **v,
+            "taxable": round(v["taxable"], 2),
+            "cgst": round(v["cgst"], 2),
+            "sgst": round(v["sgst"], 2),
+            "igst": round(v["igst"], 2),
+            "gst": round(v["gst"], 2),
+        }
+        for k, v in sorted(buckets.items(), key=lambda kv: kv[1]["gst_rate"])
+    ]
     return {
         "rows": rows,
-        "total_taxable": round(sum(r["taxable"] for r in rows), 2),
-        "total_gst": round(sum(r["gst"] for r in rows), 2),
-        "total_orders": len(orders),
+        "total_taxable": round(total_taxable, 2),
+        "total_cgst": round(total_cgst, 2),
+        "total_sgst": round(total_sgst, 2),
+        "total_igst": round(total_igst, 2),
+        "total_gst": round(total_gst, 2),
+        "total_invoice_value": round(total_taxable + total_gst, 2),
+        "total_orders": total_orders,
+        "start": start,
+        "end": end,
     }
 
 
@@ -1768,6 +2012,8 @@ async def list_staff(user: dict = Depends(require_roles("super_admin", "owner", 
 
 @api.post("/staff")
 async def create_staff(body: StaffCreateIn, user: dict = Depends(require_roles("super_admin", "owner", "admin"))):
+    await require_plan_feature(user, "staff_users")
+    await enforce_standard_limits(user, "staff")
     existing = await db.users.find_one({"email": body.email.lower()})
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -2491,6 +2737,7 @@ async def admin_list_all_wishes(user: dict = Depends(get_current_user)):
 # ---------- Branch Metrics (Manage All Branches) ----------
 @api.get("/branches/metrics")
 async def branch_metrics(user: dict = Depends(get_current_user)):
+    await require_plan_feature(user, "manage_all_branches")
     """Aggregated per-branch stats for the current tenant.
     Returns: list of { branch_id, name, code, customers, inventory, low_stock, orders_30d, revenue_30d, revenue_lifetime, unpaid_due }
     Plus an entry with branch_id=null for records without a branch (unassigned)."""
@@ -2666,6 +2913,7 @@ async def copilot_query(body: CopilotQueryIn, user: dict = Depends(get_current_u
     """AI Sales Copilot — answers natural language questions about your shop's data.
     The LLM is given a summary of the tenant's data (top sellers, non-visiting customers, revenue, low stock, etc.)
     and asked to answer the question conversationally."""
+    await require_plan_feature(user, "copilot_query")
     if not EMERGENT_LLM_KEY:
         raise HTTPException(503, "AI key not configured")
     q = (body.question or "").strip()
@@ -2829,13 +3077,17 @@ async def rx_shared_pdf(token: str):
     if not rx:
         raise HTTPException(404, "Prescription not found")
     # Reuse the PDF-building code by calling the auth version's builder via an internal user shim.
-    fake_user = {"id": oid, "role": "owner", "owner_id": oid}
+    # Use role="super_admin" to bypass plan-gating (the share link was minted by an authenticated user).
+    fake_user = {"id": oid, "role": "super_admin", "owner_id": oid}
     return await prescription_pdf(cid, rx_id, user=fake_user)  # type: ignore
 
 
 @api.get("/customers/{cid}/prescriptions/{rx_id}/pdf")
 async def prescription_pdf(cid: str, rx_id: str, user: dict = Depends(get_current_user)):
     """Generate a branded PDF of a customer's prescription. Auth-scoped to the tenant."""
+    # Plan check only when called with an authenticated user; internal (share-link) calls skip this via fake_user.role="owner" (owners always have access)
+    if user.get("role") != "super_admin":
+        await require_plan_feature(user, "prescription_pdf")
     c = await db.customers.find_one(tenant_filter(user, {"id": cid}), {"_id": 0})
     if not c:
         raise HTTPException(404, "Customer not found")
@@ -2975,6 +3227,7 @@ class BulkBarcodeIn(BaseModel):
 async def bulk_barcode_labels(body: BulkBarcodeIn, user: dict = Depends(get_current_user)):
     """Bulk print barcode labels for many inventory items in a single PDF.
     Body: { items: [{item_id, count}], size: 'small'|'medium'|'large' }."""
+    await require_plan_feature(user, "bulk_barcode")
     if not body.items:
         raise HTTPException(400, "No items selected")
     from reportlab.lib.pagesizes import mm
@@ -3046,6 +3299,7 @@ async def copilot_plan_action(body: CopilotActionIn, user: dict = Depends(get_cu
       - review_request_delivered: send a Google review request to customers whose orders were delivered in last N days.
       - restock_alert: list low-stock items and (optionally) draft supplier messages.
     """
+    await require_plan_feature(user, "copilot_actions")
     if not EMERGENT_LLM_KEY:
         raise HTTPException(503, "AI key not configured")
     q = (body.prompt or "").strip()

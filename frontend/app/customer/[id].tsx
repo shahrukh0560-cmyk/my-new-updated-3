@@ -9,6 +9,7 @@ import { api } from "@/src/api";
 import { colors, spacing, radius, sizes } from "@/src/theme";
 import ScreenHeader from "@/src/components/ScreenHeader";
 import { openWhatsApp } from "@/src/utils/whatsapp";
+import DateField from "@/src/components/DateField";
 
 const RX_FIELDS = ["od_sph","od_cyl","od_axis","od_add","os_sph","os_cyl","os_axis","os_add","pd"] as const;
 type RxKey = typeof RX_FIELDS[number];
@@ -308,7 +309,7 @@ function RxModal({ visible, onClose, onSave, initial }: any) {
           </View>
           <ScrollView contentContainerStyle={{ padding: spacing.lg }}>
             <Text style={styles.label}>Date</Text>
-            <TextInput testID="rx-date-input" value={form.date} onChangeText={(v) => set("date", v)} style={styles.input} placeholder="YYYY-MM-DD" placeholderTextColor={colors.muted} />
+            <DateField testID="rx-date-input" value={form.date} onChange={(v) => set("date", v)} />
             {(["od","os"] as const).map((eye) => (
               <View key={eye}>
                 <Text style={[styles.label, { marginTop: spacing.md }]}>{eye === "od" ? "Right (OD)" : "Left (OS)"}</Text>
@@ -395,28 +396,38 @@ function EditCustomerModal({ visible, customer, onClose, onSaved }: any) {
             <Pressable onPress={onClose}><Ionicons name="close" size={22} color={colors.onSurface} /></Pressable>
           </View>
           <ScrollView contentContainerStyle={{ padding: spacing.lg }}>
-            {(["name","phone","email","address","dob","birthday","anniversary","gstin","notes"] as const).map((k) => (
-              <View key={k} style={{ marginBottom: spacing.md }}>
-                <Text style={styles.label}>{
-                  k === "dob" ? "Date of birth (YYYY-MM-DD)" :
-                  k === "birthday" ? "Birthday (YYYY-MM-DD)" :
-                  k === "anniversary" ? "Anniversary (YYYY-MM-DD)" :
-                  k === "gstin" ? "GSTIN" :
-                  k[0].toUpperCase() + k.slice(1)
-                }{(k === "name" || k === "phone") ? " *" : ""}</Text>
-                <TextInput
-                  testID={`edit-customer-${k}-input`}
-                  value={form[k] || ""}
-                  onChangeText={(v) => set(k, v)}
-                  style={[styles.input, k === "notes" && { height: 90, textAlignVertical: "top" }]}
-                  multiline={k === "notes"}
-                  autoCapitalize={k === "email" ? "none" : "sentences"}
-                  keyboardType={k === "phone" ? "phone-pad" : k === "email" ? "email-address" : "default"}
-                  placeholder={k === "birthday" || k === "anniversary" || k === "dob" ? "YYYY-MM-DD" : ""}
-                  placeholderTextColor={colors.muted}
-                />
-              </View>
-            ))}
+            {(["name","phone","email","address","dob","birthday","anniversary","gstin","notes"] as const).map((k) => {
+              const isDate = k === "dob" || k === "birthday" || k === "anniversary";
+              return (
+                <View key={k} style={{ marginBottom: spacing.md }}>
+                  <Text style={styles.label}>{
+                    k === "dob" ? "Date of birth" :
+                    k === "birthday" ? "Birthday" :
+                    k === "anniversary" ? "Anniversary" :
+                    k === "gstin" ? "GSTIN" :
+                    k[0].toUpperCase() + k.slice(1)
+                  }{(k === "name" || k === "phone") ? " *" : ""}</Text>
+                  {isDate ? (
+                    <DateField
+                      testID={`edit-customer-${k}-input`}
+                      value={form[k] || ""}
+                      onChange={(v) => set(k, v)}
+                    />
+                  ) : (
+                    <TextInput
+                      testID={`edit-customer-${k}-input`}
+                      value={form[k] || ""}
+                      onChangeText={(v) => set(k, v)}
+                      style={[styles.input, k === "notes" && { height: 90, textAlignVertical: "top" }]}
+                      multiline={k === "notes"}
+                      autoCapitalize={k === "email" ? "none" : "sentences"}
+                      keyboardType={k === "phone" ? "phone-pad" : k === "email" ? "email-address" : "default"}
+                      placeholderTextColor={colors.muted}
+                    />
+                  )}
+                </View>
+              );
+            })}
             {err ? <Text style={{ color: colors.error }} testID="edit-customer-error">{err}</Text> : null}
             <Pressable testID="save-edit-customer-button" onPress={onSave} disabled={busy} style={[styles.cta, { marginTop: spacing.lg }, busy && { opacity: 0.7 }]}>
               <Text style={styles.ctaText}>{busy ? "Saving…" : "Update Customer"}</Text>

@@ -8,6 +8,7 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { useIconFonts } from "@/src/hooks/use-icon-fonts";
 import { AuthProvider } from "@/src/auth";
 import { BranchProvider } from "@/src/branch";
+import { PaywallProvider } from "@/src/components/PaywallModal";
 
 LogBox.ignoreAllLogs(true);
 SplashScreen.preventAutoHideAsync();
@@ -25,9 +26,11 @@ export default function RootLayout() {
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
         <AuthProvider>
-          <BranchProvider>
-            <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: "#F7F8F7" } }} />
-          </BranchProvider>
+          <PaywallProvider>
+            <BranchProvider>
+              <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: "#F7F8F7" } }} />
+            </BranchProvider>
+          </PaywallProvider>
         </AuthProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>

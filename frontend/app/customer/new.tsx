@@ -4,6 +4,7 @@ import { useRouter } from "expo-router";
 import { api } from "@/src/api";
 import { colors, spacing, radius, sizes } from "@/src/theme";
 import ScreenHeader from "@/src/components/ScreenHeader";
+import DateField from "@/src/components/DateField";
 
 export default function NewCustomer() {
   const router = useRouter();
@@ -30,27 +31,37 @@ export default function NewCustomer() {
     <KeyboardAvoidingView style={{ flex: 1, backgroundColor: colors.surface }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
       <ScreenHeader title="New Customer" />
       <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: 120 }}>
-        {(["name","phone","email","address","dob","birthday","anniversary","notes"] as const).map((k) => (
-          <View key={k} style={{ marginBottom: spacing.md }}>
-            <Text style={styles.label}>{
-              k === "dob" ? "Date of birth (YYYY-MM-DD)" :
-              k === "birthday" ? "Birthday (YYYY-MM-DD)" :
-              k === "anniversary" ? "Anniversary (YYYY-MM-DD)" :
-              k[0].toUpperCase() + k.slice(1)
-            }{(k==="name"||k==="phone")?" *":""}</Text>
-            <TextInput
-              testID={`new-customer-${k}-input`}
-              value={(form as any)[k]}
-              onChangeText={(v) => setForm({ ...form, [k]: v })}
-              style={[styles.input, k === "notes" && { height: 90, textAlignVertical: "top" }]}
-              multiline={k === "notes"}
-              autoCapitalize={k === "email" ? "none" : "sentences"}
-              keyboardType={k === "phone" ? "phone-pad" : k === "email" ? "email-address" : "default"}
-              placeholder={k === "birthday" || k === "anniversary" || k === "dob" ? "YYYY-MM-DD" : ""}
-              placeholderTextColor={colors.muted}
-            />
-          </View>
-        ))}
+        {(["name","phone","email","address","dob","birthday","anniversary","notes"] as const).map((k) => {
+          const isDate = k === "dob" || k === "birthday" || k === "anniversary";
+          return (
+            <View key={k} style={{ marginBottom: spacing.md }}>
+              <Text style={styles.label}>{
+                k === "dob" ? "Date of birth" :
+                k === "birthday" ? "Birthday" :
+                k === "anniversary" ? "Anniversary" :
+                k[0].toUpperCase() + k.slice(1)
+              }{(k==="name"||k==="phone")?" *":""}</Text>
+              {isDate ? (
+                <DateField
+                  testID={`new-customer-${k}-input`}
+                  value={(form as any)[k]}
+                  onChange={(v) => setForm({ ...form, [k]: v })}
+                />
+              ) : (
+                <TextInput
+                  testID={`new-customer-${k}-input`}
+                  value={(form as any)[k]}
+                  onChangeText={(v) => setForm({ ...form, [k]: v })}
+                  style={[styles.input, k === "notes" && { height: 90, textAlignVertical: "top" }]}
+                  multiline={k === "notes"}
+                  autoCapitalize={k === "email" ? "none" : "sentences"}
+                  keyboardType={k === "phone" ? "phone-pad" : k === "email" ? "email-address" : "default"}
+                  placeholderTextColor={colors.muted}
+                />
+              )}
+            </View>
+          );
+        })}
         {err ? <Text style={{ color: colors.error }} testID="new-customer-error">{err}</Text> : null}
       </ScrollView>
       <View style={styles.footer}>

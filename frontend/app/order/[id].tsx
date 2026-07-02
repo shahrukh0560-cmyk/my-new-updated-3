@@ -7,6 +7,7 @@ import { useAuth } from "@/src/auth";
 import { colors, spacing, radius, sizes } from "@/src/theme";
 import ScreenHeader from "@/src/components/ScreenHeader";
 import { openWhatsApp, orderSummaryMessage } from "@/src/utils/whatsapp";
+import DateField from "@/src/components/DateField";
 
 const currency = (n: number) => `₹${(n || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
 
@@ -336,14 +337,11 @@ function OrderEditModal({ visible, order, onClose, onSaved }: any) {
               style={styles.input}
               placeholderTextColor={colors.muted}
             />
-            <Text style={[styles.editLabel, { marginTop: spacing.md }]}>Expected delivery date (YYYY-MM-DD)</Text>
-            <TextInput
+            <Text style={[styles.editLabel, { marginTop: spacing.md }]}>Expected delivery date</Text>
+            <DateField
               testID="edit-order-expected-date"
               value={form.expected_delivery_date}
-              onChangeText={(v) => set("expected_delivery_date", v)}
-              style={styles.input}
-              placeholder="YYYY-MM-DD"
-              placeholderTextColor={colors.muted}
+              onChange={(v) => set("expected_delivery_date", v)}
             />
             {err ? <Text style={{ color: colors.error, marginTop: spacing.sm }}>{err}</Text> : null}
             <Pressable
